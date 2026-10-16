@@ -1,0 +1,49 @@
+# Template for .github/workflows/ci.yml in a book's companion repo.
+# Copied at bootstrap; replace <PYTHON_VERSIONS> with the book's tested-version matrix
+# from the manifest's `stack:` block (for example ["3.12", "3.13"]).
+#
+# Kept minimal on purpose: it runs exactly what every increment already runs locally,
+# the tests and the type check, so a green tag means the same thing on a reader's
+# machine as on the author's. Nothing here needs a secret or a network service; tests
+# that need one are skip-guarded in the suite itself.
+#
+# Before the first push, check each `uses:` line against the action's current release
+# notes and bump the major version if a newer one is out. Do not guess a version.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # --locked fails the job if uv.lock disagrees with pyproject.toml, which is
+      # the point of tracking the lockfile. --all-extras installs optional
+      # dependency sets (for example a `graph` extra) so no test is skipped for a
+      # missing import in CI.
+      - name: Install
+        run: uv sync --locked --all-extras
+
+      - name: Tests
+        run: uv run pytest -q
+
+      - name: Type check
+        run: uv run mypy

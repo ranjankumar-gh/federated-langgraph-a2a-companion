@@ -1,0 +1,50 @@
+#!/bin/sh
+# commit-msg: block tool attribution from this repo's history.
+#
+# This repo is published under the author's name and readers clone it, so the
+# byline is theirs alone. The rk-book-gen and rk-book-companion-codebase-builder
+# skills both carry this rule, but a skill only applies if it is loaded in that
+# session. This hook applies always.
+#
+# WHY commit-msg AND NOT pre-commit. Git passes the message file only to
+# commit-msg. The earlier version of this check was installed as pre-commit and
+# read "$1", which pre-commit never receives, so every message check in it was
+# silently off. The staged-file checks now live in .githooks/pre-commit.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+#
+# What is banned: credit for the TOOL that wrote the code.
+# What is NOT banned: the model the code calls. claude-sonnet-4-6,
+# ANTHROPIC_API_KEY, langchain_anthropic and prose about Claude-the-model are
+# the book's subject matter. Only the patterns below are attribution.
+
+msg_file="$1"
+fail=0
+
+if [ -z "$msg_file" ] || [ ! -f "$msg_file" ]; then
+    echo "commit-msg: no message file passed; is this installed as commit-msg?" >&2
+    exit 1
+fi
+
+# Ignore comment lines git strips anyway (the verbose diff, the template).
+body=$(grep -v '^#' "$msg_file")
+
+if printf '%s\n' "$body" | grep -qiE '^[[:space:]]*Co-Authored-By:.*(Claude|Anthropic|noreply@anthropic\.com)'; then
+    echo "commit-msg: the message carries a Co-Authored-By attribution trailer." >&2
+    fail=1
+fi
+if printf '%s\n' "$body" | grep -qiE '^[[:space:]]*Claude-Session:|claude\.ai/code/session_'; then
+    echo "commit-msg: the message carries a Claude Code session link." >&2
+    fail=1
+fi
+if printf '%s\n' "$body" | grep -qiE 'Generated (with|by) \[?Claude'; then
+    echo "commit-msg: the message carries a 'Generated with Claude Code' footer." >&2
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo "" >&2
+    echo "Remove the attribution line and commit again." >&2
+    exit 1
+fi
+exit 0

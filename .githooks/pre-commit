@@ -1,0 +1,53 @@
+#!/bin/sh
+# pre-commit: keep tool config and accidental lockfiles out of this repo.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+#
+# 1. CLAUDE.md and .claude/ are authoring-tool config. They do not belong in a
+#    repo published under the author's name.
+# 2. A lockfile other than uv.lock that was never tracked before is almost
+#    always an accident: a stray `git add -A` once committed an untracked
+#    lockfile nobody had decided to ship. uv.lock is the one lockfile this repo
+#    tracks, and it is committed deliberately at bootstrap. A lockfile that is
+#    already tracked (a deliberate, reviewed decision) passes.
+
+fail=0
+# Split the file lists on newlines only, so a path with a space stays whole.
+IFS='
+'
+
+# Added files only for the lockfile rule; added or modified for tool config.
+added=$(git diff --cached --name-only --diff-filter=A)
+changed=$(git diff --cached --name-only --diff-filter=AM)
+
+for f in $changed; do
+    case "$f" in
+        CLAUDE.md|*/CLAUDE.md|.claude/*|*/.claude/*)
+            echo "pre-commit: $f is authoring-tool config and does not belong in this repo." >&2
+            fail=1
+            ;;
+    esac
+done
+
+for f in $added; do
+    base=${f##*/}
+    case "$base" in
+        uv.lock)
+            ;;
+        *.lock|package-lock.json|npm-shrinkwrap.json|pnpm-lock.yaml|yarn.lock|\
+        poetry.lock|Pipfile.lock|pdm.lock|requirements*.lock|Cargo.lock|Gemfile.lock|\
+        composer.lock|bun.lockb|pylock*.toml)
+            echo "pre-commit: $f is a lockfile this repo has never tracked." >&2
+            echo "            uv.lock is the only tracked lockfile. Unstage it with:" >&2
+            echo "            git restore --staged -- '$f'" >&2
+            fail=1
+            ;;
+    esac
+done
+
+if [ "$fail" -ne 0 ]; then
+    echo "" >&2
+    echo "Commit blocked. Stage paths explicitly (git add -- <path>), never git add -A." >&2
+    exit 1
+fi
+exit 0
