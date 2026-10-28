@@ -72,6 +72,27 @@ required for the rest of the suite to pass.
 Every test runs the real A2A SDK client against the real SDK servers in one process over
 `httpx.ASGITransport`: no sockets, no model keys.
 
+### Chapter 4: The Agent Card Is a Contract, Not a Brochure
+
+- `seamkit/contract.py`: the seam contract. `Field`, `SkillTerms` and `SeamTerms` are the
+  partner's terms, published on its card as a data-only extension (`publish`, read back
+  with `terms_of`); `Expectations` is the caller's half, loaded from a TOML file; `check`
+  holds one against the other; `seam_spec` derives Chapter 3's `SeamSpec`; `args_model`
+  generates a remote skill tool's argument schema from the partner's input terms.
+- `meridian/expectations/*.toml`: Claims' expectations, one file per seam.
+  `meridian/federated.py` derives `SEAMS` from them.
+- `meridian/data_classes.py`: Meridian's data classes and which may cross to each owner.
+- `seamkit/remote.py`: `connect` checks the contract; a breached seam raises
+  `ContractBreach` before sending; a completed artifact is checked against the shapes the
+  seam reads. `seamkit/server.py`: `agent_card` takes `extensions`.
+- `northgate/server.py`, `meridian/risk_server.py`, `meridian/finance_server.py`: each
+  partner's published terms; Northgate's v8 revision requires the vehicle's VIN.
+- `tests/test_ch04_contract.py`: the v8 incident, found the day it is announced; the
+  data-class refusal of Chapter 1's whole-state send; and the 0-1 score that passes every
+  declared check.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch04_contract.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

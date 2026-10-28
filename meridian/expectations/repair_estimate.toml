@@ -1,0 +1,14 @@
+# What Claims depends on from Northgate's estimate_repair. Claims owns this file.
+seam = "repair_estimate"
+owner = "Northgate"
+skill = "estimate_repair"
+sends = ["claim_id", "damaged_parts"]
+refuses = ["photo_url"]  # no Claims human photographs a car
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+slo_seconds = 10.0
+
+[reads.estimate]
+into = "repair_estimate"
+type = "number"
+unit = "claim currency"

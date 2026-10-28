@@ -1,0 +1,14 @@
+# What Claims depends on from Risk's screen_fraud. Claims owns this file.
+seam = "fraud_screening"
+owner = "Risk"
+skill = "screen_fraud"
+sends = ["claim_id", "amount", "days_to_report", "prior_claims"]
+answers = ["police_report"]  # a Claims adjuster answers it
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+slo_seconds = 10.0
+
+[reads.fraud_score]
+into = "fraud_score"
+type = "number"
+bounds = [0, 100]  # the referral threshold of 70 is written on this scale

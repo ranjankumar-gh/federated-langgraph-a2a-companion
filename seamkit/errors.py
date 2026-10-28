@@ -41,4 +41,13 @@ class PartnerRejected(SeamError):
 
 
 class MalformedAnswer(SeamError):
-    """The task completed, but its artifact lacks a field the seam maps into state."""
+    """The task completed, but its artifact lacks a field the seam maps into state,
+    or carries one in a shape the seam's contract does not allow."""
+
+
+class ContractBreach(SeamError):
+    """The partner's terms in force break what this seam depends on.
+
+    Found at connect, raised by the seam's node before anything is sent. Only the
+    breached seam stops; every other seam keeps running.
+    """

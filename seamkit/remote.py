@@ -5,10 +5,14 @@ records the partner-issued contextId and taskId against the caller's thread (the
 thread link), turns every task state into a state update or a typed SeamError, writes
 the partner's artifact into state only through the seam's field map, and emits one
 crossing record per call.
+
+Since Chapter 4, `connect` checks the partner's published terms against the seam's
+expectations, a breached seam refuses to send, and a completed artifact is checked
+against the shapes the seam depends on before the field map writes it.
 """
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -21,7 +25,19 @@ from a2a.types import TaskState
 from a2a.utils.errors import A2AError
 from langgraph.types import interrupt
 
+from seamkit.contract import (
+    NO_CROSSING,
+    Breach,
+    CrossingPolicy,
+    Expectations,
+    Field,
+    SeamTerms,
+    held_to,
+    terms_of,
+    violations,
+)
 from seamkit.errors import (
+    ContractBreach,
     MalformedAnswer,
     PartnerFailed,
     PartnerNeedsAuth,
@@ -60,25 +76,47 @@ class SeamSpec:
     receives: Mapping[str, str]  # artifact key -> state field
     asks_caller: bool = False  # input-required goes to the caller's own interrupt()
     timeout: float = 10.0  # seconds before a send counts as PartnerUnavailable
+    # artifact key -> the shape the seam depends on, from its expectations (Chapter 4)
+    shapes: Mapping[str, Field] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class PartnerConnection:
-    """A partner's card as fetched, and an A2A client built from it."""
+    """A partner's card as fetched, an A2A client built from it, and the contract."""
 
     card: AgentCard
     client: Client
+    terms: tuple[SeamTerms, ...] = ()  # the revisions held to, the one in force first
+    breaches: tuple[Breach, ...] = ()  # in force now: the seam refuses to send
+    upcoming: tuple[Breach, ...] = ()  # in announced revisions, each with its date
 
     @property
     def release(self) -> str:
         return self.card.version
 
 
-async def connect(url: str, http: httpx.AsyncClient) -> PartnerConnection:
-    """Fetch the partner's card and build a blocking (non-streaming) client for it."""
+contract_logger = logging.getLogger("seamkit.contract")
+
+
+async def connect(url: str, http: httpx.AsyncClient,
+                  expects: Expectations | None = None,
+                  policy: CrossingPolicy = NO_CROSSING,
+                  terms: Sequence[SeamTerms] = ()) -> PartnerConnection:
+    """Fetch the partner's card, build a client, and check the seam's contract.
+
+    With no expectations there is no seam to check (a lookup, a tool's partner).
+    `terms` stands in for a partner that publishes none: the terms agreed on paper.
+    """
     card = await A2ACardResolver(http, url).get_agent_card()
     factory = ClientFactory(ClientConfig(httpx_client=http, streaming=False))
-    return PartnerConnection(card, factory.create(card))
+    revisions = tuple(terms) or terms_of(card)
+    if expects is None:
+        return PartnerConnection(card, factory.create(card), revisions)
+    now, announced = held_to(revisions, expects, policy)
+    for breach in announced:  # found on the day it is announced, not the day it lands
+        contract_logger.warning("contract breach announced: %s", breach)
+    return PartnerConnection(card, factory.create(card), revisions,
+                             tuple(now), tuple(announced))
 
 
 @dataclass(frozen=True)
@@ -151,11 +189,17 @@ class RemoteAgentNode:
         missing = [key for key in self.seam.receives if key not in answer]
         if missing:
             raise MalformedAnswer(self.seam.name, f"artifact lacks {missing}", task.id)
+        if wrong := violations(answer, self.seam.shapes):  # the contract's shapes
+            raise MalformedAnswer(self.seam.name, "; ".join(wrong), task.id)
         # The field map: only the keys this seam names reach state, under our names.
         return {ours: answer[theirs] for theirs, ours in self.seam.receives.items()}
 
     async def _send(self, data: Mapping[str, Any],
                     link: Mapping[str, str] | None = None) -> Task:
+        if self.partner.breaches:  # held per seam: this one stops, the others run
+            self.log(self._record("send", tuple(data))(error=ContractBreach.__name__))
+            raise ContractBreach(
+                self.seam.name, "; ".join(b.detail for b in self.partner.breaches))
         message = new_data_message(
             dict(data), role=Role.ROLE_USER,
             context_id=link["context_id"] if link else None,

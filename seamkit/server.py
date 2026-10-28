@@ -6,7 +6,7 @@ when the thread is paused), interrupt() becomes input-required, and the final st
 becomes one artifact. The caller never sees the partner's checkpoint.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from a2a.helpers import get_data_parts, new_data_part, new_task_from_user_message
@@ -18,6 +18,7 @@ from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentExtension,
     AgentInterface,
     AgentSkill,
 )
@@ -31,16 +32,19 @@ from seamkit.errors import SeamError
 AnyGraph = CompiledStateGraph[Any, Any, Any, Any]
 
 
-def agent_card(name: str, url: str, release: str,
-               skills: Mapping[str, str]) -> AgentCard:
-    """A minimal card: one JSON-RPC interface, no streaming, one entry per skill."""
+def agent_card(name: str, url: str, release: str, skills: Mapping[str, str],
+               extensions: Sequence[AgentExtension] = ()) -> AgentCard:
+    """A minimal card: one JSON-RPC interface, no streaming, one entry per skill.
+
+    `extensions` carries what the protocol has no field for, such as seam terms.
+    """
     return AgentCard(
         name=name,
         description=f"{name} (Meridian claims federation)",
         version=release,
         supported_interfaces=[AgentInterface(
             protocol_binding="JSONRPC", protocol_version="1.0", url=url)],
-        capabilities=AgentCapabilities(streaming=False),
+        capabilities=AgentCapabilities(streaming=False, extensions=list(extensions)),
         default_input_modes=["application/json"],
         default_output_modes=["application/json"],
         skills=[AgentSkill(id=sid, name=sid, description=text, tags=["meridian"])

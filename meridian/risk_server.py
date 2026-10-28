@@ -4,9 +4,13 @@ Risk's graph is LangGraph with its own checkpointer, as in Chapter 1. From Chapt
 asks for a police report reference on claims over 10,000 by calling interrupt(), and the
 executor turns that pause into an input-required task. The caller never reads Risk's
 checkpoint; it sees a task, a question, and in the end one artifact.
+
+Risk publishes its seam terms on its card (Chapter 4): the score is on 0-100.
+`rescaled=True` deploys release 2026.10's change, a score on 0-1, whatever the card says.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import date
 from typing import Any, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -15,10 +19,24 @@ from langgraph.types import interrupt
 from starlette.applications import Starlette
 
 from meridian.agents import screen_fraud
+from seamkit.contract import Field, SeamTerms, SkillTerms, publish
 from seamkit.server import GraphExecutor, a2a_app, agent_card
 
 RISK_URL = "http://risk.meridian.test/"
 POLICE_REPORT_OVER = 10_000.0
+
+SCREEN_FRAUD = SkillTerms(
+    inputs=(Field("claim_id", "string"), Field("amount", "number"),
+            Field("days_to_report", "integer"), Field("prior_claims", "integer")),
+    outputs=(Field("fraud_score", "number", bounds=(0.0, 100.0)),),
+    asks=("police_report",), p95_seconds=5.0)
+RISK_TERMS = SeamTerms("2026.09", date(2026, 9, 14), {"screen_fraud": SCREEN_FRAUD},
+                       auth=("mtls", "delegation"), skew_seconds=30,
+                       accepts=frozenset({"claim", "vehicle", "claim_history"}))
+# The 0-1 change, published honestly: what release 2026.10's card should have said.
+RISK_TERMS_0_1 = replace(RISK_TERMS, revision="2026.10", effective=date(2026, 10, 6),
+                         skills={"screen_fraud": replace(SCREEN_FRAUD, outputs=(
+                             Field("fraud_score", "number", bounds=(0.0, 1.0)),))})
 
 
 class RiskScreenState(TypedDict, total=False):
@@ -57,13 +75,17 @@ class RiskPartner:
 
     release: str = "2026.09"
     checkpointer: InMemorySaver = field(default_factory=InMemorySaver)
+    terms: SeamTerms = RISK_TERMS
+    rescaled: bool = False  # release 2026.10: the score leaves Risk on 0-1
 
     def __post_init__(self) -> None:
+        scale = 100.0 if self.rescaled else 1.0
         self.graph = build_risk_graph(self.checkpointer)
         self.executor = GraphExecutor(
             self.graph, "fraud_screening",
             to_input=lambda claim: {"claim": claim},
-            to_artifact=lambda out: {"fraud_score": out["fraud_score"]})
+            to_artifact=lambda out: {"fraud_score": out["fraud_score"] / scale})
         self.card = agent_card("Risk fraud screening", RISK_URL, self.release,
-                               {"screen_fraud": "Fraud score 0-100 for one claim"})
+                               {"screen_fraud": "Fraud score 0-100 for one claim"},
+                               extensions=[publish(self.terms)])
         self.app: Starlette = a2a_app(self.card, self.executor)

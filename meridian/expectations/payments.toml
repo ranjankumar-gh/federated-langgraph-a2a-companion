@@ -1,0 +1,12 @@
+# What Claims depends on from Finance's pay_claim. Claims owns this file.
+seam = "payments"
+owner = "Finance"
+skill = "pay_claim"
+sends = ["claim_id", "amount", "repair_estimate"]
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+slo_seconds = 10.0
+
+[reads.payment_ref]
+into = "payment_ref"
+type = "string"

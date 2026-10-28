@@ -31,4 +31,5 @@ files = ["meridian", "seamkit", "tests"]
 dev = [
     "mypy>=2.4.0",
     "pytest>=9.1.1",
+    "types-protobuf>=7.35.1.20260906",
 ]

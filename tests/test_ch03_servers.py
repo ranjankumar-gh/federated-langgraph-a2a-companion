@@ -3,7 +3,6 @@
 import httpx
 import pytest
 from a2a.types import TaskState
-from pydantic import BaseModel
 
 from meridian.claims_server import CLAIMS_URL, claims_agent, claims_app
 from meridian.federated import SEAMS, A2APartners, connect_partners, in_process_http
@@ -13,10 +12,6 @@ from seamkit.remote import CrossingRecord, RemoteAgentNode, SeamSpec, connect
 from seamkit.tools import remote_skill_tool
 
 pytestmark = pytest.mark.anyio
-
-
-class EstimateHistoryArgs(BaseModel):
-    parts: list[str]
 
 
 async def claims_node(partners: A2APartners) -> RemoteAgentNode:
@@ -59,8 +54,8 @@ async def test_a_remote_skill_tool_is_built_from_the_card_as_fetched() -> None:
     partners = A2APartners()
     conns = await connect_partners(partners.apps())
     records: list[CrossingRecord] = []
+    # Since Chapter 4 the argument schema comes from Northgate's published terms.
     tool = remote_skill_tool(conns["repair_estimate"], "estimate_history", "Northgate",
-                             EstimateHistoryArgs, {"history": "history"},
                              log=records.append)
     assert tool.name == "estimate_history"
     assert tool.description.startswith("Past estimates")
