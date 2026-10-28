@@ -36,7 +36,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from a2a.client import A2ACardResolver, Client, ClientCallContext, ClientConfig
@@ -65,6 +65,7 @@ from seamkit.contract import (
     violations,
 )
 from seamkit.breaker import SeamBreaker
+from seamkit.costs import BUDGET_URI, BudgetSpent, CostEntry, Costs, purpose_of
 from seamkit.errors import (
     BehaviourDrift,
     BreakerOpen,
@@ -139,6 +140,8 @@ OUTCOMES: dict[int, type[SeamError] | None] = {
 }
 
 COMPLETED = TaskState.TASK_STATE_COMPLETED
+FINAL = frozenset({COMPLETED, TaskState.TASK_STATE_FAILED,
+                   TaskState.TASK_STATE_CANCELED, TaskState.TASK_STATE_REJECTED})
 INPUT_REQUIRED = TaskState.TASK_STATE_INPUT_REQUIRED
 
 
@@ -432,6 +435,10 @@ class RemoteAgentNode:
     receipts: Receipts | None = None
     # key -> the traceparent of the send that opened its task, until the ledger has it
     traces: dict[str, str] = field(default_factory=dict)
+    # Chapter 18: the seam's budget, its ledger and its rate card; None prices nothing.
+    # key -> what the task is for, decided before the send
+    costs: Costs | None = None
+    purposes: dict[str, str] = field(default_factory=dict)
 
     async def __call__(self, state: Mapping[str, Any]) -> dict[str, Any]:
         name = self.seam.name
@@ -479,13 +486,36 @@ class RemoteAgentNode:
         key = entry["idempotency_key"]
         if parent := self.traces.pop(key, ""):
             seen = {**seen, "traceparent": parent}
-        if self.receipts is None:
+        if self.receipts is not None:
+            if said is not None:
+                seen = {**seen, "sent": self.receipts.sent(said, key)}
+            if moved(entry, seen) or task.status.state == COMPLETED:
+                seen = {**seen, "receipt": self.receipt(seen, task, said).digest}
+        return self._costed(entry, seen, task)  # Chapter 18: the charge, if it ended
+
+    def _costed(self, entry: LedgerEntry, seen: LedgerEntry,
+                task: Task) -> LedgerEntry:
+        """Chapter 18: a task that ended is a charge, priced and put on the ledger."""
+        if self.costs is None or "cost" in entry or task.status.state not in FINAL:
             return seen
-        if said is not None:
-            seen = {**seen, "sent": self.receipts.sent(said, key)}
-        if moved(entry, seen) or task.status.state == COMPLETED:
-            seen = {**seen, "receipt": self.receipt(seen, task, said).digest}
-        return seen
+        key, held = seen["idempotency_key"], (self.partner.terms[0]
+                                             if self.partner.terms else None)
+        skill = held.skills.get(self.seam.skill) if held else None
+        fixed = (skill.cost_per_task if skill and task.status.state == COMPLETED
+                 else None)
+        price, usage = self.costs.priced(self.seam.name, task, fixed)
+        purpose = self.purposes.pop(key, "claim")
+        if purpose == "compensation":  # what the partner says is owed (Chapter 13)
+            answer = {k: v for a in task.artifacts for p in get_data_parts(a.parts)
+                      for k, v in p.items()}
+            price = float(answer.get("owed", 0.0))
+        now = seamkit.ledger.CLOCK()
+        cost = self.costs.ledger.append(CostEntry(
+            self.seam.name, self.seam.owner, thread_of(), task.id, key,
+            self.seam.skill, purpose, held.revision if held else "", price, usage,
+            seen.get("receipt", ""), now))
+        self.costs.after(self.seam.name, now)
+        return {**seen, "cost": cost.digest}
 
     def receipt(self, seen: LedgerEntry, task: Task,
                 said: Mapping[str, Any] | None) -> SeamReceipt:
@@ -535,6 +565,18 @@ class RemoteAgentNode:
             pass
         raise PartnerUnavailable(self.seam.name, f"sent, outcome unknown: {why}",
                                  entry["task_id"])
+
+    def purpose(self, data: Mapping[str, Any], key: str | None,
+                link: Mapping[str, Any] | None) -> str:
+        """What a send is for: a canary, a recording, an undo, a trial, or a claim's."""
+        if key and key in self.purposes:
+            return self.purposes[key]
+        held = self.partner.terms[0] if self.partner and self.partner.terms else None
+        undoes = held is not None and any(
+            s.compensated_by == self.seam.skill for s in held.skills.values())
+        trial = self.breaker is not None and self.breaker.state != "closed"
+        resend = (link or {}).get("state") == "unknown"  # after a restart: no record
+        return purpose_of(data, resend, trial, undoes)
 
     def breaker_holds(self) -> str:
         """Why the seam's breaker refuses new work now (Chapter 14), or ""."""
@@ -670,6 +712,13 @@ class RemoteAgentNode:
         # Chapter 14: only a send that opens work asks the breaker; a reply to an open
         # task, a read and a cancel never do
         breaker = None if (link or {}).get("task_id") else self.breaker
+        if self.costs is not None and not (link or {}).get("task_id"):
+            purpose = self.purpose(data, key, link)
+            if why := self.costs.refuses(self.seam.name, purpose,
+                                         seamkit.ledger.CLOCK()):
+                self.log(self._record("send", tuple(data), key or "")(
+                    error=BudgetSpent.__name__))
+                raise BudgetSpent(self.seam.name, why)  # Claims stops paying
         if breaker and (why := breaker.allow(seamkit.ledger.CLOCK())):
             self.log(self._record("send", tuple(data), key or "")(
                 error=BreakerOpen.__name__))
@@ -703,6 +752,9 @@ class RemoteAgentNode:
         task_key = key or str((link or {}).get("idempotency_key", ""))
         if self.receipts is not None and task_key:  # Chapter 17: the task's nonce
             message.metadata.update({NONCE: self.receipts.nonce(task_key)})
+        if self.costs is not None:  # Chapter 18: the most Claims will pay for it
+            use = self.purposes.setdefault(task_key, self.purpose(data, key, link))
+            message.metadata.update({BUDGET_URI: self.costs.ceiling(use).plain()})
         with seam_span(self.seam.name, "send", self.seam.skill, sorted(data)) as span:
             inject(message.metadata)  # the trace context crosses in the message
             if key and (parent := traceparent(span)):
@@ -757,6 +809,9 @@ class RemoteAgentNode:
             raise ContractBreach(
                 self.seam.name, "; ".join(b.detail for b in self.partner.breaches))
         task = await self._post({k: data[k] for k in self.seam.sends}, None, key)
+        if self.costs is not None:  # Chapter 18: a canary is a real task, billed too
+            probed = cast(LedgerEntry, {"idempotency_key": key})
+            self._costed(cast(LedgerEntry, {}), probed, task)
         if (error := OUTCOMES[task.status.state]) is not None:
             raise error(self.seam.name, TaskState.Name(task.status.state), task.id)
         answer: dict[str, Any] = {}

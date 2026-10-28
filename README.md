@@ -414,6 +414,33 @@ tests/test_ch16_contracts.py`.
 Run only this chapter's tests with `uv run pytest tests/test_ch17_receipts.py
 tests/test_ch17_ownership.py`.
 
+### Chapter 18: Who Pays: Budgets as Contract Terms
+
+- `seamkit/costs.py`: the budget ceiling (`Ceiling`, carried in the message's metadata
+  under `urn:seamkit:seam-budget`), the partner's signed `UsageReport` and the `Meter` that
+  cuts it, the stand-in token counter (`tokens`), the rate card, `CostEntry` and
+  `CostLedger`, `CostBudget` (a `[budget]` table) and `spend` per purpose, `BudgetSpent`,
+  `Costs` (what a node needs to price its tasks), `purpose_of`, `check_invoice` and
+  `credit`. The companion's models are scripted, so token counts are stand-ins.
+- `seamkit/remote.py`: the node sends the ceiling, refuses a send whose line is spent, and
+  writes a cost entry when a task ends (canaries included); the ledger entry gains `cost`.
+  `seamkit/server.py`: `a2a_app(meter=)` hands the ceiling to the run's config and signs a
+  usage report into every task. `seamkit/contract.py`: `SkillTerms.usage` and
+  `honours_budget`, `Expectations.budget`, and the rule that refuses a budget the terms
+  cannot meet. `BudgetSpent` joins `CLAIMS_REFUSED`; the ownership map gains `cost`.
+- `meridian/risk_server.py`: the scripted `ScreeningModel`; releases 2027.03 (the
+  self-check) and 2027.04 (terms that report usage and honour the ceiling).
+  `meridian/rates.toml`: Meridian's rate card. `meridian/costs.py`: budgets, `costed`,
+  `with_costs`. `meridian/expectations/*.costed.toml`: the screening and estimate seams with
+  their `[budget]` tables. `northgate/server.py`: `statement`, one line per billed task.
+- `tests/test_ch18_costs.py`: the screening that cost three times as much, the ceiling, the
+  signed report, a partner that ignores it, `check`'s rule, a retry to Risk, the tax in
+  tokens, and the inventory. `tests/test_ch18_invoice.py`: Northgate's statement against the
+  receipts, four wrong lines, the residue on Claims' line, an unpriced seam, the SLO credit.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch18_costs.py
+tests/test_ch18_invoice.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

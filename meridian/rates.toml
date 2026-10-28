@@ -1,0 +1,5 @@
+# Meridian's internal rate card for model tokens. Finance owns this file; Risk prices
+# its usage reports by it, and Claims prices the ledger by it. The number is a design
+# value for the running example, not any provider's price.
+owner = "Finance"
+per_thousand = 2.0  # claim currency per thousand tokens, input and output alike

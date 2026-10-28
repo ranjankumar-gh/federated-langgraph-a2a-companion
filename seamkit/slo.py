@@ -20,7 +20,8 @@ if TYPE_CHECKING:
 
 # Sends Claims refused itself: nothing reached the partner, so nothing is spent.
 CLAIMS_REFUSED = frozenset({"BreakerOpen", "CardUntrusted", "ContractBreach",
-                            "BehaviourDrift", "DelegationRefused", "UntrustedEgress"})
+                            "BehaviourDrift", "DelegationRefused", "UntrustedEgress",
+                            "BudgetSpent"})  # Chapter 18: Claims stopped paying
 
 
 @dataclass(frozen=True)

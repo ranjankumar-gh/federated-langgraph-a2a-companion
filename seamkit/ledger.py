@@ -70,6 +70,8 @@ class LedgerEntry(TypedDict):
     traceparent: NotRequired[str]
     sent: NotRequired[dict[str, Any]]
     receipt: NotRequired[str]
+    # Chapter 18: the digest of the seam cost ledger's entry for this task's charge
+    cost: NotRequired[str]
 
 
 def merge_ledger(current: Mapping[str, LedgerEntry],

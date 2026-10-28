@@ -1,0 +1,41 @@
+# What Claims depends on from Risk's screen_fraud once its cost is budgeted (Chapter 18).
+# Claims owns this file. The earlier chapters' federations keep fraud_screening.toml.
+seam = "fraud_screening"
+owner = "Risk"
+skill = "screen_fraud"
+protocols = ["1.0"]  # Chapter 15: newest first; a card offering none is a breach
+sends = ["claim_id", "amount", "days_to_report", "prior_claims"]
+answers = ["police_report"]  # a Claims adjuster answers it
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+slo_seconds = 10.0
+delivery = "stream"  # a blocking send: one answer, seconds long
+lookup = true  # Risk honours no key: look it up before a send, in case one left
+notice_days = 21  # Chapter 15: a breaking revision is on the card 3 weeks ahead
+
+[canary]  # Chapter 15: three golden screenings, judged against the baseline
+every_seconds = 3600  # hourly: screening is Meridian's own, with no price per task
+absolute = 2.0  # a score may move 2 points on 0-100
+confirm = 1  # a wrong score clears fraud: one run out of band is drift
+on_drift = "hold"  # no claim is screened, and none cleared, until a person decides
+
+[reads.fraud_score]
+into = "fraud_score"
+type = "number"
+bounds = [0, 100]  # the referral threshold of 70 is written on this scale
+
+[slo]  # Chapter 17: the partner's promise, measured by Claims on the shared clock
+target = 0.95  # Risk promises 5 s at p95: 95 sends in 100 inside it
+seconds = 5.0
+window_days = 28  # a design value for Meridian, not a benchmark
+alert = 0.5  # half the window's budget spent pages both owners
+
+[budget]  # Chapter 18: what a screening may cost Claims, charged back by Finance
+per_task = 1.0  # the ceiling sent with every screening, in claim currency
+window_days = 28  # the SLO's window, on the same clock
+alert = 0.8  # a line 80% spent signals both owners
+
+[budget.lines]  # Risk's usage, priced by Meridian's rate card (design values)
+claim = 1_400.0  # about 50 screenings a day at the ceiling
+canary = 1_500.0  # three goldens hourly: 72 a day
+retry = 50.0  # Risk honours no key: every resend is a screening read again

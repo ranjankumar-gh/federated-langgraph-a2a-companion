@@ -30,6 +30,7 @@ from typing import Any, TypedDict
 import httpx
 from a2a.server.context import ServerCallContext
 from a2a.types import AgentCard
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -39,9 +40,11 @@ from starlette.types import ASGIApp
 from meridian.agents import screen_fraud
 from meridian.identity import KEYS, MERIDIAN_TRUSTS, revocation_sources
 from meridian.incident import ForwardingAuth
+from meridian.rates import RATES
 from seamkit.breaker import BreakerPolicy, SeamBreaker
 from seamkit.cards import card_digest
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
+from seamkit.costs import Ceiling, Meter, RateCard, tokens
 from seamkit.delegation import DelegationAuth, Grant, Guard, as_peer, inbound_chain
 from seamkit.errors import SeamError
 from seamkit.ingress import IngressRule
@@ -81,6 +84,13 @@ RISK_TERMS_2027_02 = replace(
     RISK_TERMS, revision="2027.02", effective=date(2027, 2, 1),
     skills={"screen_fraud": replace(SCREEN_FRAUD, outputs=(
         *SCREEN_FRAUD.outputs, Field("basis", "string")))})
+# Chapter 18: release 2027.04 reports what every screening spent, signed, and honours
+# the ceiling a caller sends. Release 2027.03 shipped the self-check under 2027.02's
+# terms, which state no price and promise no report.
+RISK_TERMS_2027_04 = replace(
+    RISK_TERMS_2027_02, revision="2027.04", effective=date(2027, 4, 5),
+    skills={"screen_fraud": replace(RISK_TERMS_2027_02.skills["screen_fraud"],
+                                    usage="reported", honours_budget=True)})
 
 
 def risk_card(release: str, terms: SeamTerms = RISK_TERMS,
@@ -95,7 +105,8 @@ def risk_card(release: str, terms: SeamTerms = RISK_TERMS,
 # Risk's pipeline publishes each card's digest with the release; Claims pins them.
 RELEASED: tuple[tuple[str, SeamTerms], ...] = (
     ("2026.09", RISK_TERMS), ("2026.10", RISK_TERMS), ("2026.10", RISK_TERMS_0_1),
-    ("2026.11", RISK_TERMS), ("2026.12", RISK_TERMS), ("2027.02", RISK_TERMS_2027_02))
+    ("2026.11", RISK_TERMS), ("2026.12", RISK_TERMS), ("2027.02", RISK_TERMS_2027_02),
+    ("2027.03", RISK_TERMS_2027_02), ("2027.04", RISK_TERMS_2027_04))
 PUBLISHED_DIGESTS = frozenset(card_digest(risk_card(*release)) for release in RELEASED)
 
 
@@ -133,6 +144,58 @@ HISTORY_RULES: dict[str, IngressRule] = {
 }
 
 
+# Chapter 18: Risk's screening model, scripted. The score is screen_fraud's on every
+# pass; what a model would read and write is counted with the stand-in counter. The
+# instructions' sizes are design values: the self-check's are twice the screening's.
+SCREEN_PROMPT_TOKENS = 300
+CHECK_PROMPT_TOKENS = 600
+
+
+@dataclass
+class ScreeningModel:
+    """`self_check` deploys release 2027.03's second pass, which re-reads the claim,
+    the first pass's reasons and the estimate history. `honours` deploys 2027.04,
+    which prices the second pass before it runs and skips it over the ceiling."""
+
+    self_check: bool = False
+    honours: bool = False
+    rates: RateCard = RATES
+    meter: Meter | None = None  # the signed usage report, when Risk reports one
+    calls: dict[str, int] = field(default_factory=dict)  # task -> model calls
+    spent: dict[str, int] = field(default_factory=dict)  # task -> tokens, Risk's own
+
+    def call(self, task: str, prompt: int, asked: Any, said: Any) -> int:
+        count = prompt + tokens(asked) + tokens(said)  # input and output
+        self.calls[task] = self.calls.get(task, 0) + 1
+        self.spent[task] = self.spent.get(task, 0) + count
+        if self.meter is not None:
+            self.meter.spend(task, count)
+        return self.spent[task]
+
+    def screen(self, claim: dict[str, Any], history: list[dict[str, Any]],
+               config: RunnableConfig) -> tuple[float, list[str]]:
+        task = str(config["configurable"].get("task_id", ""))
+        score, signals = screen_fraud(claim)
+        first = {"score": score, "reasons": signals}
+        spent = self.call(task, SCREEN_PROMPT_TOKENS, {"claim": claim}, first)
+        if not self.self_check:
+            return score, signals
+        asked = {"claim": claim, "first_pass": first, "history": history}
+        ceiling: Ceiling | None = config["configurable"].get("ceiling")
+        if self.honours and ceiling is not None:  # 2027.04: priced before it runs
+            would = spent + CHECK_PROMPT_TOKENS + tokens(asked) + tokens(first)
+            if self.rates.price(would) > ceiling.per_task:
+                if self.meter is not None:
+                    self.meter.notes[task] = "self-check skipped: ceiling"
+                return score, signals
+        self.call(task, CHECK_PROMPT_TOKENS, asked, first)  # the same score again
+        return score, signals
+
+    def statement(self) -> dict[str, float]:
+        """Risk's own record of each task's spend, priced: what the chargeback reads."""
+        return {task: self.rates.price(n) for task, n in self.spent.items()}
+
+
 def require_police_report(state: RiskScreenState) -> RiskScreenState:
     if float(state["claim"]["amount"]) <= POLICE_REPORT_OVER:
         return {}
@@ -148,7 +211,8 @@ def screen(state: RiskScreenState) -> RiskScreenState:
 
 def build_risk_graph(checkpointer: InMemorySaver,
                      lookups: asyncio.Event | None = None,
-                     consult: Any = None) -> Any:
+                     consult: Any = None,
+                     model: ScreeningModel | None = None) -> Any:
     async def look_up_police_report(state: RiskScreenState) -> RiskScreenState:
         if float(state["claim"]["amount"]) <= POLICE_REPORT_OVER:
             return {}
@@ -156,10 +220,17 @@ def build_risk_graph(checkpointer: InMemorySaver,
         await lookups.wait()  # the records service answers when it answers
         return {"police_report": POLICE_RECORDS.get(state["claim"]["claim_id"], "")}
 
+    def screen_by_model(state: RiskScreenState,
+                        config: RunnableConfig) -> RiskScreenState:
+        assert model is not None
+        score, signals = model.screen(state["claim"], state.get("history_seen", []),
+                                      config)
+        return {"fraud_score": score, "fraud_signals": signals}
+
     graph = StateGraph(RiskScreenState)
     first = require_police_report if lookups is None else look_up_police_report
     graph.add_node(first.__name__, first)
-    graph.add_node("screen", screen)
+    graph.add_node("screen", screen if model is None else screen_by_model)
     if consult is not None:  # the assistant looks before the police-report question
         graph.add_node("consult_northgate", consult)
         graph.add_edge(START, "consult_northgate")
@@ -201,13 +272,22 @@ class RiskPartner:
     protocols: tuple[str, ...] = ("1.0",)
     # Chapter 17: Risk signs its half of every seam receipt, a CI rule inside Meridian
     countersigns: bool = False
+    # Chapter 18: the screening model behind screen_fraud (None: Chapter 1's rules
+    # alone), and whether Risk signs a usage report into every task it answers
+    model: ScreeningModel | None = None
+    meters: bool = False
 
     def __post_init__(self) -> None:
         sources = (revocation_sources() if self.revocations is None
                    else self.revocations)
         self.check = checker(sources)
         consult = self._consult_northgate if self.assistant else None
-        self.graph = build_risk_graph(self.checkpointer, self.lookups, consult)
+        self.meter = (Meter(KEYS["risk"], "risk", RATES, self.now) if self.meters
+                      else None)
+        if self.model is not None:
+            self.model.meter = self.meter
+        self.graph = build_risk_graph(self.checkpointer, self.lookups, consult,
+                                      self.model)
         self.executor = GraphExecutor(
             self.graph, "fraud_screening",
             to_input=lambda claim: {"claim": claim},
@@ -221,7 +301,7 @@ class RiskPartner:
                                                "estimate_history", self.breaker)
         self.card = risk_card(self.release, self.terms, self.protocols)
         signs = Countersigner(KEYS["risk"], "risk", self.now) if self.countersigns else None
-        inner = a2a_app(self.card, self.executor, countersign=signs)
+        inner = a2a_app(self.card, self.executor, countersign=signs, meter=self.meter)
         self.guard = Guard(inner, "risk", MERIDIAN_TRUSTS, now=self.now,
                            revoked=self.check)
         self.app: ASGIApp = inner if self.forwards else self.guard

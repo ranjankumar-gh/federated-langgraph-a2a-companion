@@ -77,6 +77,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Route
 
 from seamkit.contract import terms_of
+from seamkit.costs import Meter, ceiling_of
 from seamkit.delegation import Verified
 from seamkit.errors import SeamError
 from seamkit.ledger import state_name
@@ -234,6 +235,7 @@ class KeyedHandler(DefaultRequestHandler):
     """
 
     countersigner: Countersigner | None = None
+    meter: Meter | None = None  # Chapter 18: the partner's signed usage reports
 
     def __init__(self, *args: Any, windows: Mapping[str, int], keys: Keys,
                  now: Callable[[], float], **kwargs: Any) -> None:
@@ -245,9 +247,16 @@ class KeyedHandler(DefaultRequestHandler):
         message = params.message
         signer = self.countersigner
         arrived = signer.received(message) if signer else None  # before the executor
+        if (ceiling := ceiling_of(message)) is not None:  # Chapter 18: for the run
+            context.state["ceiling"] = ceiling
         with served(skill_of(message), message.metadata):
             result = await self._keyed(params, context)
-        if signer is None or not isinstance(result, Task):
+        if not isinstance(result, Task):
+            return result
+        if self.meter is not None:  # the report first: the half signs no metadata
+            self.meter.received(result.id, message)
+            result = self.meter.stamp(result)
+        if signer is None:
             return result
         if arrived is not None:
             signer.arrived[result.id] = arrived
@@ -256,6 +265,8 @@ class KeyedHandler(DefaultRequestHandler):
     async def on_get_task(self, params: GetTaskRequest,
                           context: ServerCallContext) -> Task | None:
         task: Task | None = await super().on_get_task(params, context)
+        if task is not None and self.meter is not None:
+            task = self.meter.stamp(task)
         if task is None or self.countersigner is None:
             return task
         return self.countersigner.stamp(task)
@@ -299,7 +310,8 @@ def a2a_app(card: AgentCard, executor: AgentExecutor,
                         PushNotificationSender] | None = None,
             keys: Keys | None = None,
             now: Callable[[], float] = time.time,
-            countersign: Countersigner | None = None) -> Starlette:
+            countersign: Countersigner | None = None,
+            meter: Meter | None = None) -> Starlette:
     """A Starlette app serving the card and the JSON-RPC endpoint at the card's URL.
 
     `extra` adds routes beside them, such as the key set a card's signature names.
@@ -311,6 +323,8 @@ def a2a_app(card: AgentCard, executor: AgentExecutor,
     its handler does cannot disagree.
     `countersign` is the partner's half of every seam receipt (Chapter 17), signed with
     the key behind its card; None returns no half, and the caller's receipts are its own.
+    `meter` signs a usage report into every task it returns (Chapter 18), and the
+    ceiling a caller's message carries reaches the run's config as `ceiling`.
     """
     configs, sender = push or (None, None)
     handler = KeyedHandler(
@@ -318,6 +332,7 @@ def a2a_app(card: AgentCard, executor: AgentExecutor,
         agent_card=card, push_config_store=configs, push_sender=sender,
         windows=key_windows(card), keys={} if keys is None else keys, now=now)
     handler.countersigner = countersign
+    handler.meter = meter
     routes = [*create_agent_card_routes(card), *extra,
               *create_jsonrpc_routes(handler, "/")]
     app = Starlette(routes=routes)
@@ -423,6 +438,8 @@ class GraphExecutor(AgentExecutor):
                                                    "inbound_key":
                                                        context.message.message_id,
                                                    **self.configure(call)}}
+        if "ceiling" in call.state:  # Chapter 18: the most the caller will pay
+            config["configurable"]["ceiling"] = call.state["ceiling"]
         data = get_data_parts(context.message.parts)[0]
         if context.task_id in self.held:  # a renewal: resume with the held answer
             data = self.held.pop(context.task_id)

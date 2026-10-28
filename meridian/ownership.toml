@@ -13,6 +13,7 @@ residue = ["caller", "claims-recoveries"]  # money owed, or an undo refused
 push = ["caller"]  # a forged or flooding push is Claims' receiver's problem
 receipt = ["caller", "callee"]  # a mismatch is a dispute: both owners hear it
 slo = ["caller", "callee"]  # a promise one team made another
+cost = ["caller", "callee"]  # Chapter 18: what a task cost is both owners' to know
 
 [seams.fraud_screening]
 callee = "Risk"

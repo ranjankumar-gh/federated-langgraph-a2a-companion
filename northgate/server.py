@@ -52,6 +52,7 @@ from meridian.agents import PART_PRICES
 from meridian.identity import MERIDIAN, revocation_sources
 from meridian.incident import introspect
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
+from seamkit.costs import Charge
 from seamkit.delegation import Guard, Trust, Verified, peer_of
 from seamkit.cards import jwk, sign_card
 from seamkit.revocation import ActPoint, RevocationSource, checker, still_holds
@@ -248,6 +249,7 @@ class NorthgateExecutor(AgentExecutor):
         self.received: list[dict[str, Any]] = []
         self.estimates: dict[str, float] = {}
         self.billed: dict[str, float] = {}  # task -> what Meridian is charged for it
+        self.keys: dict[str, str] = {}  # task -> the key its first message carried
         self.pending: dict[str, dict[str, Any]] = {}  # estimates waiting on authority
         self.acts: list[dict[str, Any]] = []  # every act point: when, which task, outcome
         self.canceled: list[str] = []  # tasks that ended canceled, never billed
@@ -270,6 +272,7 @@ class NorthgateExecutor(AgentExecutor):
             return
         request = get_data_parts(context.message.parts)[0]
         skill = str(context.message.metadata["skill"])
+        self.keys.setdefault(context.task_id, context.message.message_id)
         tenant = self._tenant(caller, request)
         self.received.append({"skill": skill, "request": request, "tenant": tenant,
                               "context_id": context.context_id, **_who(caller)})
@@ -531,6 +534,11 @@ class NorthgatePartner:
         front: ASGIApp = self.guard if self.verifies_chains else TokenCheck(inner)
         self.sources = sources
         self.app: ASGIApp = Doorway(front, {DOORBELL_PATH: doorbell(self.ring)})
+
+    def statement(self) -> list[Charge]:
+        """Chapter 18: Northgate's statement to Meridian, one line per billed task."""
+        return [Charge(task, self.executor.keys.get(task, ""), "estimate_repair", price)
+                for task, price in self.executor.billed.items()]
 
     def ring(self) -> None:
         """Meridian's issuer signed a new list: pull it now, through the same checks."""

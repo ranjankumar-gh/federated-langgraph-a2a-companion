@@ -20,6 +20,7 @@ from pydantic import BaseModel, create_model
 
 from seamkit.breaker import MODES, BreakerPolicy
 from seamkit.canary import DRIFT_ACTIONS, Band, CanaryPolicy
+from seamkit.costs import CostBudget, budget_of
 from seamkit.retry import NO_RETRY, RetryPolicy
 from seamkit.slo import SeamSLO, slo_of
 
@@ -65,7 +66,7 @@ class SkillTerms:
     outputs: tuple[Field, ...]
     asks: tuple[str, ...] = ()  # what the skill may stop in input-required for
     p95_seconds: float | None = None  # 95 of 100 tasks answer inside this
-    cost_per_task: float | None = None  # declared here, enforced from Chapter 18
+    cost_per_task: float | None = None  # declared in Chapter 4, read from Chapter 18
     compensated_by: str = ""  # the skill that undoes this one, from Chapter 13
     # Chapter 10: the longest a task may wait on the partner's own people before the
     # partner reassigns or fails it; None states no wait horizon
@@ -76,6 +77,10 @@ class SkillTerms:
     # Chapter 13: how long after a task of this skill commits the partner promises to
     # honour `compensated_by`; None promises nothing, and an undo may be refused
     compensate_seconds: int | None = None
+    # Chapter 18: "reported" if the partner signs a usage report into every task, and
+    # whether it reads the ceiling a caller sends before it spends
+    usage: str = ""
+    honours_budget: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +142,9 @@ class Expectations:
     # keeps one-sided receipts; the seam's SLO, None for a seam nobody measures
     receipts: str = "ours"
     slo: SeamSLO | None = None
+    # Chapter 18: the seam's cost budget, the ceiling sent with every task and a line
+    # per purpose; None for a seam nobody budgets
+    budget: CostBudget | None = None
 
 
 @dataclass(frozen=True)
@@ -192,6 +200,7 @@ def check(terms: SeamTerms, expects: Expectations,
     found += _late(skill, expects)  # Chapter 14
     found += _canary(skill, expects)  # Chapter 15
     found += _receipts(terms, expects)  # Chapter 17
+    found += _costs(skill, expects)  # Chapter 18
     return [_breach(terms, expects, d) for d in found]
 
 
@@ -305,6 +314,24 @@ def _receipts(terms: SeamTerms, expects: Expectations) -> list[str]:
             "countersigned"]
 
 
+def _costs(skill: SkillTerms, expects: Expectations) -> list[str]:
+    """A seam with a budget needs a price it can afford, or a report and a promise."""
+    budget = expects.budget
+    if budget is None:
+        return []
+    if skill.cost_per_task is not None:  # a fixed price: the terms are the price
+        if skill.cost_per_task <= budget.per_task:
+            return []
+        return [f"costs {skill.cost_per_task:g} per task, more than the "
+                f"{budget.per_task:g} this seam budgets"]
+    if skill.usage != "reported":
+        return ["states no price and reports no usage, and this seam budgets "
+                f"{budget.per_task:g} per task"]
+    if not skill.honours_budget:
+        return ["reports usage but does not promise to honour the ceiling"]
+    return []
+
+
 def violations(answer: Mapping[str, Any], shapes: Mapping[str, Field]) -> list[str]:
     """What in a completed task's artifact is not the shape the seam depends on."""
     return [f"{key} is {answer[key]!r}, not {want}"
@@ -351,7 +378,8 @@ def terms_of(card: AgentCard) -> tuple[SeamTerms, ...]:
 
 def _plain(terms: SeamTerms) -> dict[str, Any]:
     def skill(s: SkillTerms) -> dict[str, Any]:
-        out = {k: v for k, v in asdict(s).items() if v not in (None, "", ())}
+        out = {k: v for k, v in asdict(s).items()
+               if v not in (None, "", ()) and v is not False}  # older cards unchanged
         for key in ("inputs", "outputs"):
             out[key] = [{k: v for k, v in f.items() if v not in (None, "")}
                         for f in out.get(key, [])]
@@ -387,7 +415,8 @@ def _skill(raw: Mapping[str, Any]) -> SkillTerms:
         int(raw["wait_seconds"]) if raw.get("wait_seconds") is not None else None,
         int(raw["key_seconds"]) if raw.get("key_seconds") is not None else None,
         int(raw["compensate_seconds"]) if raw.get("compensate_seconds") is not None
-        else None)
+        else None,
+        str(raw.get("usage", "")), bool(raw.get("honours_budget", False)))
 
 
 def _terms(raw: Mapping[str, Any]) -> SeamTerms:
@@ -432,7 +461,8 @@ def load_expectations(path: Path) -> Expectations:
         notice_days=int(raw["notice_days"]) if "notice_days" in raw else None,
         canary=_canary_policy(raw["canary"]) if "canary" in raw else None,
         receipts=str(raw.get("receipts", "ours")),
-        slo=slo_of(raw["slo"]) if "slo" in raw else None)
+        slo=slo_of(raw["slo"]) if "slo" in raw else None,
+        budget=budget_of(raw["budget"]) if "budget" in raw else None)
 
 
 def _policy(raw: Mapping[str, Any]) -> RetryPolicy:

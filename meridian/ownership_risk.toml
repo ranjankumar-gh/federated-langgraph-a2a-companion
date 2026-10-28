@@ -13,6 +13,7 @@ residue = ["caller"]
 push = ["caller"]
 receipt = ["caller", "callee"]
 slo = ["caller", "callee"]
+cost = ["caller", "callee"]
 
 [seams.estimate_history]  # the peer seam: Risk calls Northgate
 callee = "Northgate"
