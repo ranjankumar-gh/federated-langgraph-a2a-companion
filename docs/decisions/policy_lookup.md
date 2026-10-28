@@ -25,7 +25,7 @@ problem, not a reason for a seam.
 ## Predicted costs
 - re-sent per task: 2 fields (claim_id, damaged_parts)
 - latency: a round trip per claim instead of a function call
-- request body (CLM-1001): 310 bytes
+- request body (CLM-1001): 306 bytes
 - lost from the Claims checkpoint: the policy revision read, and 4 subgraph checkpoints
 
 ## Shape

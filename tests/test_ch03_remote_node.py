@@ -1,4 +1,7 @@
-"""RemoteAgentNode over the real A2A SDK, in process: the thread link and the wire."""
+"""RemoteAgentNode over the real A2A SDK, in process: the wire, and the task it links.
+
+The link assertions read the task ledger, which replaced the thread link in Chapter 9.
+"""
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -25,7 +28,7 @@ async def test_clean_claim_settles_over_a2a() -> None:
     out = await (await fed.graph()).ainvoke(clean_claim(), thread("t1"))
     assert out["decision"] == "paid"
     assert out["payment_ref"] == "PAY-CLM-1001-3000"
-    assert sorted(out["thread_links"]) == ["fraud_screening", "payments",
+    assert sorted(out["ledger"]) == ["fraud_screening", "payments",
                                            "repair_estimate"]
     assert [r.seam for r in fed.records] == ["fraud_screening", "repair_estimate",
                                              "payments"]  # one record per crossing
@@ -45,7 +48,7 @@ async def test_each_seam_sends_only_the_fields_it_names() -> None:
 async def test_the_partner_mints_the_context_and_we_record_it() -> None:
     fed = Federation()
     out = await (await fed.graph()).ainvoke(clean_claim(), thread("t3"))
-    link = out["thread_links"]["fraud_screening"]
+    link = out["ledger"]["fraud_screening"]
     risk = fed.partners.risk
     assert risk.executor.received[-1]["context_id"] == link["context_id"]
     # Risk keyed its own thread by the context it minted, not by our thread id.
@@ -80,7 +83,7 @@ async def test_the_thread_link_makes_the_resume_answer_the_same_task() -> None:
     received = fed.partners.risk.executor.received
     assert [r["resumed"] for r in received] == [False, True]  # one task, answered
     assert {r["task_id"] for r in received} == {
-        out["thread_links"]["fraud_screening"]["task_id"]}
+        out["ledger"]["fraud_screening"]["task_id"]}
 
 
 async def test_a_question_nobody_planned_to_answer_raises() -> None:

@@ -63,6 +63,10 @@ class CardUntrusted(SeamError):
     """
 
 
+class StaleLedgerWrite(SeamError):
+    """A ledger write was computed from an entry another writer has since replaced."""
+
+
 class DelegationRefused(SeamError):
     """A delegation chain was missing, could not be minted, or failed verification.
 
@@ -70,4 +74,13 @@ class DelegationRefused(SeamError):
     partner's card fails the trust hook, or the link would be wider than its parent),
     and inside a partner's guard when an inbound chain fails a check. The guard answers
     the caller with an authorization error, which the caller sees as PartnerRejected.
+    """
+
+
+class DelegationRevoked(DelegationRefused):
+    """The chain a task holds was revoked: the task ends, and nothing renews it.
+
+    Raised by Claims' resume gate when the chain a task was sent under is on the
+    issuer's list (after it cancels the task), by a partner's guard for any call but
+    the task's own cancel, and before a link is minted under a revoked chain.
     """

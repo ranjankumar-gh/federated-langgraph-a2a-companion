@@ -3,6 +3,8 @@
 Finance publishes its seam terms on its card (Chapter 4).
 """
 
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, TypedDict
@@ -13,10 +15,11 @@ from langgraph.graph import END, START, StateGraph
 from starlette.types import ASGIApp
 
 from meridian.agents import pay
-from meridian.identity import MERIDIAN_TRUSTS
+from meridian.identity import MERIDIAN_TRUSTS, revocation_sources
 from seamkit.cards import card_digest
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
 from seamkit.delegation import Guard
+from seamkit.revocation import RevocationSource, checker
 from seamkit.server import GraphExecutor, a2a_app, agent_card
 
 FINANCE_URL = "http://finance.meridian.test/"
@@ -55,8 +58,13 @@ PUBLISHED_DIGESTS = frozenset({card_digest(finance_card("2026.10"))})
 class FinancePartner:
     release: str = "2026.10"
     checkpointer: InMemorySaver = field(default_factory=InMemorySaver)
+    # Chapter 7: Meridian's revocation list, checked by the guard on every call.
+    revocations: Mapping[str, RevocationSource] | None = None
+    now: Callable[[], float] = time.time
 
     def __post_init__(self) -> None:
+        sources = (revocation_sources() if self.revocations is None
+                   else self.revocations)
         graph = StateGraph(PaymentState)
         graph.add_node("make_payment", make_payment)
         graph.add_edge(START, "make_payment")
@@ -68,5 +76,6 @@ class FinancePartner:
             to_artifact=lambda out: {"payment_ref": out["payment_ref"]})
         self.card = finance_card(self.release)
         inner = a2a_app(self.card, self.executor)
-        self.guard = Guard(inner, "finance", MERIDIAN_TRUSTS)
+        self.guard = Guard(inner, "finance", MERIDIAN_TRUSTS, now=self.now,
+                           revoked=checker(sources))
         self.app: ASGIApp = self.guard

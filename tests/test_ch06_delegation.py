@@ -130,7 +130,7 @@ async def test_the_fix_risk_mints_and_northgate_refuses_the_whole_book() -> None
     assert first["path"] == ("meridian-idp", "claims", "risk")
     assert "fields ['shop'] not granted" in book["refused"]
     assert book["subject"] == ADJUSTER and book["chain"] == first["chain"]
-    assert paused["thread_links"]["fraud_screening"]["authority"] == first["chain"]
+    assert paused["ledger"]["fraud_screening"]["authority"] == first["chain"]
 
 
 async def test_the_whole_claim_still_settles_under_one_chain() -> None:
@@ -138,7 +138,7 @@ async def test_the_whole_claim_still_settles_under_one_chain() -> None:
     fed = Federation(partners)
     out = await (await fed.graph()).ainvoke(clean_claim(), thread("d2"))
     assert out["decision"] == "paid"
-    chains = {link["authority"] for link in out["thread_links"].values()}
+    chains = {entry["authority"] for entry in out["ledger"].values()}
     assert len(chains) == 1  # every seam's task names the same chain
     served = partners.northgate.executor.received
     assert [r["skill"] for r in served] == ["estimate_history", "estimate_repair"]
@@ -262,7 +262,7 @@ async def test_a_meridian_chain_cannot_name_another_insurer() -> None:
 async def test_another_adjusters_chain_cannot_read_the_task() -> None:
     fed = Federation()
     out = await (await fed.graph()).ainvoke(clean_claim(), thread("o1"))
-    estimate = out["thread_links"]["repair_estimate"]["task_id"]
+    estimate = out["ledger"]["repair_estimate"]["task_id"]
     other = MeridianIssuer(sessions={**SESSIONS, "session-adj-204": (
         "adjuster:adj-204", frozenset({"CLM-2000"}))})
     northgate = (await connect_partners(fed.partners.apps(), issuer=other))[

@@ -24,7 +24,8 @@ import binascii
 import hashlib
 import json
 import time
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from itertools import pairwise
 from typing import Any
@@ -37,9 +38,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from langchain_core.runnables import ensure_config
+from langchain_core.runnables.config import var_child_runnable_config
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from seamkit.errors import DelegationRefused
+from seamkit.errors import DelegationRefused, DelegationRevoked
 
 HEADER = "a2a-delegation"  # the whole chain, encoded; never logged, never checkpointed
 
@@ -167,6 +169,18 @@ def run_value(key: str) -> Any:
     return ensure_config().get("configurable", {}).get(key)
 
 
+@contextmanager
+def run_values(**values: Any) -> Iterator[None]:
+    """Inside a run, make a nested call see extra configurable values (Chapter 7)."""
+    config = ensure_config()
+    token = var_child_runnable_config.set(
+        {**config, "configurable": {**config.get("configurable", {}), **values}})
+    try:
+        yield
+    finally:
+        var_child_runnable_config.reset(token)
+
+
 def inbound_chain() -> Chain:
     """The chain a partner verified on the request that started this run."""
     chain: Chain | None = run_value("delegation")
@@ -279,6 +293,11 @@ def outside(scope: Link, skill: str, data: Mapping[str, Any], claim: str) -> lis
     return problems
 
 
+# Why a verified chain may not be used now ("" if it may): Chapter 7's revocation check,
+# built from a partner's revocation lists by seamkit.revocation.checker.
+RevocationCheck = Callable[[Chain, float], str]
+
+
 class TaskHidden(Exception):
     """A task this chain may not see: answered exactly as a task that does not exist."""
 
@@ -342,6 +361,8 @@ class Guard:
     now: Callable[[], float] = time.time
     tasks: dict[str, tuple[str, str]] = field(default_factory=dict)  # (subject, claim)
     log: list[dict[str, Any]] = field(default_factory=list)  # the partner's own record
+    revoked: RevocationCheck | None = None  # Chapter 7: re-checked on every call
+    holders: dict[str, str] = field(default_factory=dict)  # task -> workload that sent it
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope["method"] != "POST":
@@ -369,6 +390,10 @@ class Guard:
         chain = decode(headers.get(HEADER.encode(), b"").decode())
         verified = verify(chain, peer_of(scope), self.me, self.trusts, self.now())
         params = rpc.get("params", {})
+        if self.revoked and (why := self.revoked(verified.chain, self.now())):
+            if self._cancels_own_task(scope, rpc, verified):  # the one exception
+                return verified, self._owned(str(params.get("id", "")), verified)
+            raise DelegationRevoked(self.me, why)
         if rpc.get("method") != "SendMessage":  # a read, a cancel: bound to the task
             return verified, self._owned(str(params.get("id", "")), verified)
         message = params.get("message", {})
@@ -380,6 +405,18 @@ class Guard:
         if problems := outside(verified.scope, skill, data, claim):
             raise DelegationRefused(self.me, "; ".join(problems))
         return verified, claim
+
+    def _cancels_own_task(self, scope: Scope, rpc: Mapping[str, Any],
+                          verified: Verified) -> bool:
+        """A cancel only reduces authority: allowed under a dead chain, narrowly.
+
+        The task must be one this guard recorded, for the chain's person, and the call
+        must come from the workload that sent it.
+        """
+        task_id = str(rpc.get("params", {}).get("id", ""))
+        subject, _ = self.tasks.get(task_id, ("", ""))
+        return (rpc.get("method") == "CancelTask" and subject == verified.subject
+                and self.holders.get(task_id) == peer_of(scope))
 
     def _owned(self, task_id: str, verified: Verified) -> str:
         """A task is readable only under a chain for its person and its claim."""
@@ -410,6 +447,7 @@ class Guard:
         task = result.get("task", result) if isinstance(result, dict) else {}
         if isinstance(task, dict) and task.get("id") and claim:
             self.tasks.setdefault(str(task["id"]), (verified.subject, claim))
+            self.holders.setdefault(str(task["id"]), verified.path[-1])
 
     def _entry(self, scope: Scope, rpc: Mapping[str, Any], refused: str,
                verified: Verified | None = None) -> dict[str, Any]:
@@ -419,7 +457,8 @@ class Guard:
                 "skill": message.get("metadata", {}).get("skill", ""),
                 "chain": chain_id(chain) if chain else "",
                 "subject": chain[-1].subject if chain else "",
-                "path": tuple(link.issuer for link in chain), "refused": refused}
+                "path": tuple(link.issuer for link in chain), "refused": refused,
+                "at": self.now()}
 
 
 def _quiet_decode(scope: Scope) -> Chain:

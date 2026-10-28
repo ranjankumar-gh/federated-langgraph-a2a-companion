@@ -6,6 +6,7 @@ sends = ["claim_id", "damaged_parts"]
 refuses = ["photo_url"]  # no Claims human photographs a car
 auth = ["mtls", "delegation"]
 skew_seconds = 30
+revocation_seconds = 120  # the longest a revoked chain may act at Northgate
 slo_seconds = 10.0
 
 [reads.estimate]

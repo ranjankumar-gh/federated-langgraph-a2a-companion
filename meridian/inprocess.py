@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from meridian.agents import estimate_repair, pay, screen_fraud
+from seamkit.ledger import LedgerEntry, merge_ledger
 
 
 class ClaimState(TypedDict, total=False):
@@ -31,7 +32,8 @@ class ClaimState(TypedDict, total=False):
     payment_ref: str
     decision: str  # "paid" or "refer"
     completed: Annotated[list[str], operator.add]
-    thread_links: dict[str, dict[str, str]]  # seam -> the partner's context and task
+    # seam -> Claims' record of the task it sent there; merged with a version check
+    ledger: Annotated[dict[str, LedgerEntry], merge_ledger]
 
 
 CLAIM_FIELDS = frozenset(ClaimState.__annotations__)

@@ -20,7 +20,9 @@ that key at the URL the signature's header names, which a careful caller never n
 `books=True` deploys a later card that adds a `book_repair` skill no insurer approved.
 """
 
-from collections.abc import Mapping, Sequence
+import asyncio
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any
@@ -34,11 +36,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meridian.agents import PART_PRICES, estimate_repair
-from meridian.identity import MERIDIAN
+from meridian.identity import MERIDIAN, revocation_sources
 from meridian.incident import introspect
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
 from seamkit.delegation import Guard, Trust, Verified, peer_of
 from seamkit.cards import jwk, sign_card
+from seamkit.revocation import ActPoint, RevocationSource, checker, still_holds
 from seamkit.server import a2a_app, agent_card, key_set_route
 
 NORTHGATE_URL = "http://northgate.example.test/"
@@ -67,12 +70,16 @@ NORTHGATE_V7 = SeamTerms(
     {"estimate_repair": ESTIMATE_REPAIR, "estimate_history": ESTIMATE_HISTORY},
     auth=("mtls", "delegation"), skew_seconds=30,
     accepts=frozenset({"claim", "vehicle"}))
+# Chapter 7: a dated revision adds one term, the longest Northgate will act under a
+# revoked Meridian chain. Its release (the card's version) is still v7.
+NORTHGATE_V7_1 = replace(NORTHGATE_V7, revision="v7.1", effective=date(2026, 10, 17),
+                         revocation_seconds=90)
 # v8 prices parts per model, so it needs the VIN: one new required input.
 NORTHGATE_V8 = replace(
-    NORTHGATE_V7, revision="v8", effective=date(2026, 11, 2),
+    NORTHGATE_V7_1, revision="v8", effective=date(2026, 11, 2),
     skills={**NORTHGATE_V7.skills, "estimate_repair": replace(
         ESTIMATE_REPAIR, inputs=(*ESTIMATE_REPAIR.inputs, Field("vin", "string")))})
-TERMS = {"v7": NORTHGATE_V7, "v8": NORTHGATE_V8}
+TERMS = {"v7": NORTHGATE_V7_1, "v8": NORTHGATE_V8}  # the revision each release runs
 
 # Another insurer on Northgate's network, with its own root issuer and keys. The private
 # halves would live with that insurer; the tests play it, so they are kept here.
@@ -140,20 +147,35 @@ def estimate_history(tenant: str, request: Mapping[str, Any]) -> dict[str, Any]:
 
 class NorthgateExecutor(AgentExecutor):
     def __init__(self, verifies_chains: bool = True,
-                 terms: SeamTerms = NORTHGATE_V7) -> None:
+                 terms: SeamTerms = NORTHGATE_V7_1,
+                 assessors: asyncio.Event | None = None,
+                 revocations: Mapping[str, RevocationSource] | None = None,
+                 now: Callable[[], float] = time.time,
+                 rechecks: bool = True) -> None:
         self.verifies_chains = verifies_chains
         self.terms = terms
+        self.assessors = assessors  # set: the assessor desk has finished its reviews
+        self.revocations = revocations or {}
+        self.now = now
+        self.rechecks = rechecks  # False: Chapter 6's Northgate, checked on arrival only
         self.received: list[dict[str, Any]] = []
         self.estimates: dict[str, float] = {}
+        self.billed: dict[str, float] = {}  # task -> what Meridian is charged for it
+        self.pending: dict[str, dict[str, Any]] = {}  # estimates waiting on authority
+        self.acts: list[dict[str, Any]] = []  # every act point: when, which task, outcome
+        self.canceled: list[str] = []  # tasks that ended canceled, never billed
 
     async def execute(self, context: RequestContext, queue: EventQueue) -> None:
         assert context.message and context.task_id and context.context_id
         if context.current_task is None:
             await queue.enqueue_event(new_task_from_user_message(context.message))
         updater = TaskUpdater(queue, context.task_id, context.context_id)
+        caller = context.call_context.state.get("auth")
+        if context.task_id in self.pending:  # a renewal: the resume act point
+            await self._commit(updater, context.task_id, caller, ActPoint.RESUME)
+            return
         request = get_data_parts(context.message.parts)[0]
         skill = str(context.message.metadata["skill"])
-        caller = context.call_context.state.get("auth")
         tenant = self._tenant(caller, request)
         self.received.append({"skill": skill, "request": request, "tenant": tenant,
                               "context_id": context.context_id, **_who(caller)})
@@ -169,17 +191,46 @@ class NorthgateExecutor(AgentExecutor):
         if not set(request["damaged_parts"]) <= set(PART_PRICES):
             await updater.reject()
             return
-        if "frame" in request["damaged_parts"] and "photo_url" not in request:
+        frame = "frame" in request["damaged_parts"]
+        if frame and self.assessors is not None:
+            # Chapter 7: an assessor reviews frame damage, with the photo the shop
+            # sends Northgate directly; it takes about twenty minutes.
+            await updater.start_work()
+            await self.assessors.wait()
+        elif frame and "photo_url" not in request:
             # Structural damage is never estimated unseen.
             await updater.requires_input(updater.new_agent_message(
                 [new_data_part({"needs": "photo_url",
                                 "why": "frame damage needs a photo"})]))
             return
-        estimate = estimate_repair(request)
-        self.estimates[request["claim_id"]] = estimate
-        await updater.add_artifact([new_data_part({"estimate": estimate})],
+        self.pending[context.task_id] = {"claim_id": request["claim_id"],
+                                         "estimate": estimate_repair(request)}
+        await self._commit(updater, context.task_id, caller, ActPoint.COMMIT)
+
+    async def _commit(self, updater: TaskUpdater, task_id: str, caller: Any,
+                      point: ActPoint) -> None:
+        """The act point before a result leaves Northgate: does the chain still hold?"""
+        holds = (still_holds(caller, self.revocations, self.now())
+                 if self.rechecks and isinstance(caller, Verified) else "ok")
+        self.acts.append({"point": point, "task_id": task_id, "at": self.now(),
+                          "claim_id": self.pending[task_id]["claim_id"],
+                          "holds": holds, **_who(caller)})
+        if holds == "revoked":  # final: cancelled, never billed, never resumed
+            self.pending.pop(task_id)
+            self.canceled.append(task_id)
+            await updater.cancel(updater.new_agent_message(
+                [new_data_part({"why": "delegation revoked"})]))
+            return
+        if holds != "ok":  # expired, or a list too stale to check: renewable
+            await updater.requires_auth(updater.new_agent_message(
+                [new_data_part({"needs": "delegation", "why": f"chain {holds}"})]))
+            return
+        result = self.pending.pop(task_id)
+        self.estimates[result["claim_id"]] = result["estimate"]
+        await updater.add_artifact([new_data_part({"estimate": result["estimate"]})],
                                    name="repair_estimate")
         await updater.complete()
+        self.billed[task_id] = self.terms.skills["estimate_repair"].cost_per_task or 0.0
 
     def _lacks(self, skill: str, request: Mapping[str, Any]) -> bool:
         """A required input of the terms this release runs under is missing."""
@@ -196,6 +247,8 @@ class NorthgateExecutor(AgentExecutor):
 
     async def cancel(self, context: RequestContext, queue: EventQueue) -> None:
         assert context.task_id and context.context_id
+        self.pending.pop(context.task_id, None)  # a cancelled estimate is never billed
+        self.canceled.append(context.task_id)
         await TaskUpdater(queue, context.task_id, context.context_id).cancel()
 
 
@@ -265,11 +318,20 @@ class NorthgatePartner:
     publishes: bool = True
     signs: bool = True  # since Chapter 5; False deploys the unsigned card of Chapter 4
     books: bool = False  # a card that also offers book_repair: capability inflation
+    # Chapter 7: the assessor desk for frame damage, Meridian's revocation list (pulled
+    # from Meridian's URL), the clock, and whether act points re-check the chain.
+    assessors: asyncio.Event | None = None
+    revocations: Mapping[str, RevocationSource] | None = None
+    now: Callable[[], float] = time.time
+    rechecks: bool = True
     executor: NorthgateExecutor = field(init=False)
 
     def __post_init__(self) -> None:
         terms = TERMS[self.release]
-        self.executor = NorthgateExecutor(self.verifies_chains, terms)
+        sources = (revocation_sources() if self.revocations is None
+                   else self.revocations) if self.rechecks else {}
+        self.executor = NorthgateExecutor(self.verifies_chains, terms, self.assessors,
+                                          sources, self.now, self.rechecks)
         revisions = [terms, *([self.announces] if self.announces else [])]
         self.card = northgate_card(self.release, revisions if self.publishes else [],
                                    self.books)
@@ -279,6 +341,7 @@ class NorthgatePartner:
         inner = a2a_app(self.card, self.executor, [
             key_set_route(KEY_SET_PATH,
                           {NORTHGATE_KID: NORTHGATE_SIGNING_KEY.public_key()})])
-        self.guard = Guard(inner, "northgate", TRUSTS)
+        self.guard = Guard(inner, "northgate", TRUSTS, now=self.now,
+                           revoked=checker(sources) if sources else None)
         self.app: ASGIApp = self.guard if self.verifies_chains else TokenCheck(inner)
 

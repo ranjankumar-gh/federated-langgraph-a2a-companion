@@ -1,9 +1,10 @@
 """The Risk team's fraud screening, served over A2A.
 
-Risk's graph is LangGraph with its own checkpointer, as in Chapter 1. From Chapter 3 it
+Risk's graph is LangGraph with its own checkpointer, as in Chapter 1. Release 2026.09
 asks for a police report reference on claims over 10,000 by calling interrupt(), and the
-executor turns that pause into an input-required task. The caller never reads Risk's
-checkpoint; it sees a task, a question, and in the end one artifact.
+executor turns that pause into an input-required task. Release 2026.12 stops asking and
+looks the reference up in the police records service instead, which is slow. The caller
+never reads Risk's checkpoint; it sees a task, perhaps a question, and one artifact.
 
 Risk's fraud assistant, when deployed, may call Northgate's estimate_history as a remote
 skill tool: the peer seam. `assistant` stands in for the model's tool choices. Since
@@ -15,7 +16,9 @@ Risk publishes its seam terms on its card (Chapter 4): the score is on 0-100.
 `rescaled=True` deploys release 2026.10's change, a score on 0-1, whatever the card says.
 """
 
-from collections.abc import Callable
+import asyncio
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, TypedDict
@@ -30,18 +33,21 @@ from langgraph.types import interrupt
 from starlette.types import ASGIApp
 
 from meridian.agents import screen_fraud
-from meridian.identity import KEYS, MERIDIAN_TRUSTS
+from meridian.identity import KEYS, MERIDIAN_TRUSTS, revocation_sources
 from meridian.incident import ForwardingAuth
 from seamkit.cards import card_digest
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
 from seamkit.delegation import DelegationAuth, Grant, Guard, as_peer, inbound_chain
 from seamkit.errors import SeamError
 from seamkit.remote import connect
+from seamkit.revocation import RevocationSource, checked, checker
 from seamkit.server import GraphExecutor, a2a_app, agent_card, delegation_config
 from seamkit.tools import remote_skill_tool
 
 RISK_URL = "http://risk.meridian.test/"
 POLICE_REPORT_OVER = 10_000.0
+# What the police records service holds, by claim.
+POLICE_RECORDS = {"CLM-1002": "PR-5521"}
 
 SCREEN_FRAUD = SkillTerms(
     inputs=(Field("claim_id", "string"), Field("amount", "number"),
@@ -103,17 +109,27 @@ def screen(state: RiskScreenState) -> RiskScreenState:
     return {"fraud_score": score, "fraud_signals": signals}
 
 
-def build_risk_graph(checkpointer: InMemorySaver, consult: Any = None) -> Any:
+def build_risk_graph(checkpointer: InMemorySaver,
+                     lookups: asyncio.Event | None = None,
+                     consult: Any = None) -> Any:
+    async def look_up_police_report(state: RiskScreenState) -> RiskScreenState:
+        if float(state["claim"]["amount"]) <= POLICE_REPORT_OVER:
+            return {}
+        assert lookups is not None
+        await lookups.wait()  # the records service answers when it answers
+        return {"police_report": POLICE_RECORDS.get(state["claim"]["claim_id"], "")}
+
     graph = StateGraph(RiskScreenState)
-    graph.add_node("require_police_report", require_police_report)
+    first = require_police_report if lookups is None else look_up_police_report
+    graph.add_node(first.__name__, first)
     graph.add_node("screen", screen)
     if consult is not None:  # the assistant looks before the police-report question
         graph.add_node("consult_northgate", consult)
         graph.add_edge(START, "consult_northgate")
-        graph.add_edge("consult_northgate", "require_police_report")
+        graph.add_edge("consult_northgate", first.__name__)
     else:
-        graph.add_edge(START, "require_police_report")
-    graph.add_edge("require_police_report", "screen")
+        graph.add_edge(START, first.__name__)
+    graph.add_edge(first.__name__, "screen")
     graph.add_edge("screen", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -122,22 +138,31 @@ def build_risk_graph(checkpointer: InMemorySaver, consult: Any = None) -> Any:
 class RiskPartner:
     """Risk's deployment: its graph, its checkpointer, its executor, its app.
 
-    Passing `assistant` deploys the fraud assistant and its Northgate tool; `peers`
-    holds Northgate's address.
+    Passing `lookups` deploys the 2026.12 behaviour: no question for the caller, and a
+    records lookup that finishes only when the event is set. Passing `assistant` deploys
+    the fraud assistant and its Northgate tool; `peers` holds Northgate's address.
     """
 
     release: str = "2026.09"
     checkpointer: InMemorySaver = field(default_factory=InMemorySaver)
+    lookups: asyncio.Event | None = None
     assistant: Assistant | None = None
     forwards: bool = False  # the incident's tool client
     peers: dict[str, tuple[str, ASGIApp]] = field(default_factory=dict)
     terms: SeamTerms = RISK_TERMS
     rescaled: bool = False  # release 2026.10: the score leaves Risk on 0-1
+    # Chapter 7: Meridian's revocation list, checked by the guard on every call and
+    # before Risk mints onward; None is the list at Meridian's URL.
+    revocations: Mapping[str, RevocationSource] | None = None
+    now: Callable[[], float] = time.time
 
     def __post_init__(self) -> None:
+        sources = (revocation_sources() if self.revocations is None
+                   else self.revocations)
+        self.check = checker(sources)
         consult = self._consult_northgate if self.assistant else None
         scale = 100.0 if self.rescaled else 1.0
-        self.graph = build_risk_graph(self.checkpointer, consult)
+        self.graph = build_risk_graph(self.checkpointer, self.lookups, consult)
         self.executor = GraphExecutor(
             self.graph, "fraud_screening",
             to_input=lambda claim: {"claim": claim},
@@ -145,7 +170,8 @@ class RiskPartner:
             configure=self._configure)
         self.card = risk_card(self.release, self.terms)
         inner = a2a_app(self.card, self.executor)
-        self.guard = Guard(inner, "risk", MERIDIAN_TRUSTS)
+        self.guard = Guard(inner, "risk", MERIDIAN_TRUSTS, now=self.now,
+                           revoked=self.check)
         self.app: ASGIApp = inner if self.forwards else self.guard
         self._tool: StructuredTool | None = None
 
@@ -165,8 +191,10 @@ class RiskPartner:
 
             northgate = await connect(url, http, trust=MERIDIAN_TRUST["Northgate"])
             assert northgate.trust is not None
+            # The onward act point (Chapter 7): the run's chain is re-checked first.
             http.auth = ForwardingAuth() if self.forwards else DelegationAuth(
-                "risk", KEYS["risk"], "northgate", NORTHGATE_GRANT, inbound_chain,
+                "risk", KEYS["risk"], "northgate", NORTHGATE_GRANT,
+                checked(inbound_chain, self.check, self.now),
                 northgate.card, northgate.trust.covers)
             # The argument schema comes from Northgate's published input terms.
             self._tool = remote_skill_tool(northgate, "estimate_history", "Northgate",
@@ -184,3 +212,13 @@ class RiskPartner:
             except SeamError as exc:  # a tool error goes back to the model, as text
                 seen.append({"error": type(exc).__name__, "detail": exc.detail})
         return {"history_seen": seen}
+
+    async def finish_lookups(self) -> None:
+        """Let every pending records lookup answer, and wait for Risk's tasks to end."""
+        assert self.lookups is not None
+        self.lookups.set()
+        for _ in range(500):
+            if len(self.executor.finished) == len(self.executor.received):
+                return
+            await asyncio.sleep(0.01)
+        raise TimeoutError("Risk's tasks did not finish")

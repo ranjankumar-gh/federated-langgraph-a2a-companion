@@ -81,7 +81,7 @@ def costs(callee: str) -> dict[str, str]:
     out = {"re-sent per task": f"{count} ({', '.join(sends)})"}
     if callee == "policy_lookup":
         out |= {"latency": "a round trip per claim instead of a function call",
-                "request body (CLM-1001)": "310 bytes",
+                "request body (CLM-1001)": "306 bytes",
                 "lost from the Claims checkpoint": "the policy revision read, and 4 "
                 "subgraph checkpoints"}
     else:

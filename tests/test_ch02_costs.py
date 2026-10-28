@@ -58,7 +58,7 @@ async def test_the_re_hydration_tax_crosses_on_every_task() -> None:
     # Two claims, two tasks: the same two fields re-sent each time, never read in place.
     assert [r.sent for r in records if r.call == "send"] == [
         ("claim_id", "damaged_parts")] * 2
-    assert bodies == [310, 310]  # the whole JSON-RPC request, for two fields
+    assert bodies == [306, 306]  # the whole JSON-RPC request, for two fields
     assert len(server.executor.received) == 2
 
 
@@ -81,6 +81,7 @@ async def test_the_claims_checkpoint_loses_the_policy_it_read() -> None:
     assert not [c for c in remote.checkpointer.list(config)
                 if c.config["configurable"].get("checkpoint_ns")]
     assert len(list(server.checkpointer.list(None))) == 4
+    assert a["ledger"]["policy_lookup"]["partner_release"] == "policy-2026.10"
 
 
 @pytest.mark.anyio

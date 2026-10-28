@@ -18,6 +18,7 @@ from Meridian's issuer, exchanged from the adjuster's session the run carries.
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from meridian.data_classes import MERIDIAN_POLICY
 from meridian.finance_server import FINANCE_URL, FinancePartner
 from meridian.identity import CLAIMS_ISSUER, KEYS, MeridianIssuer
 from meridian.inprocess import ClaimGraph, build_graph
+from meridian.resume import ResumeGate
 from meridian.risk_server import RISK_URL, RiskPartner
 from meridian.trust import MERIDIAN_TRUST
 from northgate.server import NORTHGATE_URL, NorthgatePartner
@@ -172,25 +174,54 @@ def with_contract(inventory: SeamInventory,
 
 
 def run_chain_id(issuer: MeridianIssuer = CLAIMS_ISSUER) -> str:
-    """What a task's thread link records as its authority: the run's chain, by id."""
+    """What a ledger entry records as its authority: the run's chain, by id."""
     return chain_id(issuer.run_chain())
 
 
 def a2a_workers(connections: Mapping[str, PartnerConnection],
                 log: Callable[[CrossingRecord], None] = log_crossing,
+                seams: Mapping[str, SeamSpec] = SEAMS,
+                issuer: MeridianIssuer = CLAIMS_ISSUER,
+                gates: bool = True,
                 ) -> dict[str, RemoteAgentNode]:
-    return {seam: RemoteAgentNode(SEAMS[seam], connections[seam], log, run_chain_id)
-            for seam in SEAMS}
+    """One node per seam. Since Chapter 7 each has the resume gate in front of it;
+    `gates=False` builds Chapter 6's nodes, which never re-check a recorded task."""
+    authority = partial(run_chain_id, issuer)
+    if not gates:
+        return {name: RemoteAgentNode(spec, connections[name], log, authority)
+                for name, spec in seams.items()}
+    return {name: ResumeGate(spec, connections[name], log, authority, issuer=issuer)
+            for name, spec in seams.items()}
 
 
 def build_a2a_graph(connections: Mapping[str, PartnerConnection],
                     checkpointer: BaseCheckpointSaver[Any] | None = None,
                     log: Callable[[CrossingRecord], None] = log_crossing,
+                    seams: Mapping[str, SeamSpec] = SEAMS,
+                    issuer: MeridianIssuer = CLAIMS_ISSUER,
+                    gates: bool = True,
                     ) -> ClaimGraph:
-    return build_graph(a2a_workers(connections, log), checkpointer)
+    return build_graph(a2a_workers(connections, log, seams, issuer, gates),
+                       checkpointer)
+
+
+def with_revocation(inventory: SeamInventory,
+                    connections: Mapping[str, PartnerConnection]) -> SeamInventory:
+    """Add each seam's revocation term to its authority answer, from the terms in force."""
+    for entry in inventory.entries:
+        conn = connections.get(entry.callee)
+        if conn is None or not conn.terms:
+            continue
+        seconds = conn.terms[0].revocation_seconds
+        held = entry.answers.get("authority", "")
+        entry.answers["authority"] = held + (
+            f"; revoked within {seconds} s" if seconds is not None
+            else "; no revocation term")
+    return inventory
 
 
 __all__ = ["EXPECTATIONS", "GRANTS", "with_authority", "with_contract", "with_trust",
+           "with_revocation", "a2a_workers",
            "OWNERS_A2A",
            "SEAMS", "A2APartners",
            "CrossingRecord", "build_a2a_graph",

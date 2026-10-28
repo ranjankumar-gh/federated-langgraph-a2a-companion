@@ -114,6 +114,29 @@ Run only this chapter's tests with `uv run pytest tests/test_ch04_contract.py`.
 
 Run only this chapter's tests with `uv run pytest tests/test_ch05_trust.py`.
 
+### Chapter 7: Revoking Mid-Task
+
+- `seamkit/revocation.py`: the signed revocation list (`RevocationList`, `revoked`), a
+  partner's copy that fails closed when stale (`RevocationSource`), the guard's hook
+  (`checker`), the act points (`ActPoint`, `still_holds`), and the onward check (`checked`).
+- `meridian/identity.py`: `MeridianIssuer.revoke` ends a person's sessions, drops her cached
+  roots, and signs a new list; `cancel_root` mints the root a cancel is sent under, already
+  revoked; `revocation_sources` is what a partner holds to pull the list.
+- `seamkit/delegation.py`: `Guard(revoked=...)` refuses a revoked chain on every call except
+  a cancel of the chain's own task from the workload that sent it.
+- `meridian/resume.py`: Claims' resume gate in front of each A2A call node; it cancels a task
+  whose recorded chain is revoked, and renews an `auth-required` task for the same person and
+  claim.
+- `northgate/server.py`: the assessor desk for frame damage, and the act points before an
+  estimate is committed. Terms revision `v7.1` states `revocation_seconds = 90`;
+  `meridian/expectations/repair_estimate.toml` accepts at most 120.
+- `seamkit/drill.py`, `meridian/drill.py`: the delegation revocation drill, on one clock.
+  `meridian/incident.py`'s `CachingIssuer` is the chapter's opening incident.
+- `tests/test_ch07_revocation.py`: the incident, the drill, the cancel exception, renewal,
+  and a stale list.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch07_revocation.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

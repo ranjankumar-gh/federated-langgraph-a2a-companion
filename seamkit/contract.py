@@ -73,6 +73,8 @@ class SeamTerms:
     auth: tuple[str, ...]  # what every request must carry
     skew_seconds: int  # clock skew the partner's verifier tolerates
     accepts: frozenset[str]  # the caller's data classes the partner agrees to hold
+    # Chapter 7: the longest the partner may act under a revoked chain; None states none
+    revocation_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,7 @@ class Expectations:
     auth: tuple[str, ...] = ()
     skew_seconds: int = 0
     slo_seconds: float = 10.0
+    revocation_seconds: int | None = None  # the most we accept; None asks for nothing
 
 
 @dataclass(frozen=True)
@@ -165,6 +168,12 @@ def _auth(terms: SeamTerms, expects: Expectations) -> list[str]:
     if terms.skew_seconds != expects.skew_seconds:
         found.append(f"tolerates {terms.skew_seconds} s of clock skew, "
                      f"not the {expects.skew_seconds} s agreed")
+    if expects.revocation_seconds is not None:  # Chapter 7's term, compared like skew
+        if terms.revocation_seconds is None:
+            found.append("states no revocation horizon")
+        elif terms.revocation_seconds > expects.revocation_seconds:
+            found.append(f"may act {terms.revocation_seconds} s on a revoked chain, "
+                         f"longer than the {expects.revocation_seconds} s agreed")
     return found
 
 
@@ -229,10 +238,13 @@ def _plain(terms: SeamTerms) -> dict[str, Any]:
                         for f in out.get(key, [])]
         return out
 
-    return {"revision": terms.revision, "effective": terms.effective.isoformat(),
-            "skills": {sid: skill(s) for sid, s in terms.skills.items()},
-            "auth": list(terms.auth), "skew_seconds": terms.skew_seconds,
-            "accepts": sorted(terms.accepts)}
+    plain = {"revision": terms.revision, "effective": terms.effective.isoformat(),
+             "skills": {sid: skill(s) for sid, s in terms.skills.items()},
+             "auth": list(terms.auth), "skew_seconds": terms.skew_seconds,
+             "accepts": sorted(terms.accepts)}
+    if terms.revocation_seconds is not None:  # Chapter 7; absent from older revisions
+        plain["revocation_seconds"] = terms.revocation_seconds
+    return plain
 
 
 def _field(raw: Mapping[str, Any]) -> Field:
@@ -254,12 +266,14 @@ def _skill(raw: Mapping[str, Any]) -> SkillTerms:
 
 
 def _terms(raw: Mapping[str, Any]) -> SeamTerms:
+    revocation = raw.get("revocation_seconds")
     return SeamTerms(
         str(raw["revision"]), date.fromisoformat(str(raw["effective"])),
         {sid: _skill(s) for sid, s in raw.get("skills", {}).items()},
         tuple(str(a) for a in raw.get("auth", [])),
         int(raw.get("skew_seconds", 0)),  # protobuf Struct numbers arrive as floats
-        frozenset(str(c) for c in raw.get("accepts", [])))
+        frozenset(str(c) for c in raw.get("accepts", [])),
+        int(revocation) if revocation is not None else None)
 
 
 # In the caller's repository: one TOML file per seam.
@@ -276,7 +290,9 @@ def load_expectations(path: Path) -> Expectations:
         into={key: str(spec.get("into", key)) for key, spec in reads.items()},
         answers=tuple(raw.get("answers", [])), refuses=tuple(raw.get("refuses", [])),
         auth=tuple(raw.get("auth", [])), skew_seconds=int(raw.get("skew_seconds", 0)),
-        slo_seconds=float(raw.get("slo_seconds", 10.0)))
+        slo_seconds=float(raw.get("slo_seconds", 10.0)),
+        revocation_seconds=(int(raw["revocation_seconds"])
+                            if "revocation_seconds" in raw else None))
 
 
 def seam_spec(expects: Expectations) -> "SeamSpec":

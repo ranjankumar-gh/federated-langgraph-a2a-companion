@@ -1,20 +1,23 @@
 """Test plumbing for the A2A wire: in-process transports and a partner outage."""
 
+import asyncio
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from starlette.types import ASGIApp
 
-from meridian.federated import A2APartners, build_a2a_graph, connect_partners
-from meridian.identity import ADJUSTER_SESSION
+from meridian.federated import SEAMS, A2APartners, build_a2a_graph, connect_partners
+from meridian.identity import ADJUSTER_SESSION, CLAIMS_ISSUER, MeridianIssuer
 from meridian.inprocess import ClaimGraph
+from meridian.risk_server import RiskPartner
 from seamkit.delegation import as_peer
-from seamkit.remote import CrossingRecord, PartnerConnection
+from seamkit.remote import CrossingRecord, PartnerConnection, SeamSpec
 
 
 def thread(tid: str) -> RunnableConfig:
@@ -57,11 +60,31 @@ class Federation:
     partners: A2APartners = field(default_factory=A2APartners)
     records: list[CrossingRecord] = field(default_factory=list)
     connections: dict[str, PartnerConnection] = field(default_factory=dict)
+    seams: Mapping[str, SeamSpec] = field(default_factory=lambda: SEAMS)
+    issuer: MeridianIssuer = field(default_factory=lambda: CLAIMS_ISSUER)
 
     async def graph(self, http: dict[str, httpx.AsyncClient] | None = None,
+                    checkpointer: BaseCheckpointSaver[Any] | None = None,
                     apps: Mapping[str, tuple[str, ASGIApp]] | None = None,
                     ) -> ClaimGraph:
         """`apps` replaces a seam's deployment, such as one a registry lookup chose."""
         deployed = {**self.partners.apps(), **(apps or {})}
-        self.connections = await connect_partners(deployed, http)
-        return build_a2a_graph(self.connections, log=self.records.append)
+        self.connections = await connect_partners(deployed, http, issuer=self.issuer)
+        return build_a2a_graph(self.connections, checkpointer,
+                               log=self.records.append, seams=self.seams,
+                               issuer=self.issuer)
+
+
+def slow_risk() -> RiskPartner:
+    """Risk's 2026.12 release: a records lookup that answers when the test says so."""
+    return RiskPartner(release="2026.12", lookups=asyncio.Event())
+
+
+# Chapter 9's incident: the screening seam returns as soon as Risk has the task.
+RETURNS_EARLY = {**SEAMS, "fraud_screening": replace(SEAMS["fraud_screening"],
+                                                     return_immediately=True)}
+
+
+def new_tasks(risk: RiskPartner) -> list[dict[str, Any]]:
+    """Risk's own log of tasks it was asked to start, as opposed to answers it got."""
+    return [r for r in risk.executor.received if not r["resumed"]]

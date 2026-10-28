@@ -117,12 +117,21 @@ class GraphExecutor(AgentExecutor):
         self.configure = configure
         # The partner's own log of what it was asked: one entry per execution.
         self.received: list[dict[str, Any]] = []
+        # Task ids whose execution has ended, finished or paused for an answer.
+        self.finished: list[str] = []
 
     async def execute(self, context: RequestContext, queue: EventQueue) -> None:
+        try:
+            await self._execute(context, queue)
+        finally:  # finished, failed, or paused for an answer
+            self.finished.append(context.task_id or "")
+
+    async def _execute(self, context: RequestContext, queue: EventQueue) -> None:
         assert context.message and context.task_id and context.context_id
         if context.current_task is None:
             await queue.enqueue_event(new_task_from_user_message(context.message))
         updater = TaskUpdater(queue, context.task_id, context.context_id)
+        await updater.start_work()
         # The caller's contextId is our thread_id. We minted it; the caller records it.
         call = context.call_context
         config: RunnableConfig = {"configurable": {"thread_id": context.context_id,
@@ -134,6 +143,7 @@ class GraphExecutor(AgentExecutor):
         verified = verified_of(call)
         self.received.append({"context_id": context.context_id, "data": data,
                               "task_id": context.task_id, "resumed": bool(paused),
+                              "message_id": context.message.message_id,
                               "credential": headers.get("authorization", ""),
                               "chain": verified.chain_id if verified else "",
                               "subject": verified.subject if verified else ""})

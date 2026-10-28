@@ -1,10 +1,10 @@
 """RemoteAgentNode: one LangGraph node that sends one partner skill one A2A task.
 
-It is the node call shape for a seam. It sends only the fields the seam names,
-records the partner-issued contextId and taskId against the caller's thread (the
-thread link), turns every task state into a state update or a typed SeamError, writes
-the partner's artifact into state only through the seam's field map, and emits one
-crossing record per call.
+It is the node call shape for a seam. It sends only the fields the seam names, keeps a
+task ledger entry for the task in the caller's own checkpoint (written before the send
+and after every answer), turns every task state into a state update or a typed
+SeamError, writes the partner's artifact into state only through the seam's field map,
+and emits one crossing record per call.
 
 Since Chapter 4, `connect` checks the partner's published terms against the seam's
 expectations, a breached seam refuses to send, and a completed artifact is checked
@@ -25,11 +25,12 @@ import httpx
 from a2a.client import A2ACardResolver, Client, ClientCallContext, ClientConfig
 from a2a.client import A2AClientError, ClientFactory
 from a2a.helpers import get_data_parts, new_data_message
-from a2a.types import AgentCard, GetTaskRequest, Role, SendMessageRequest, Task
-from a2a.types import TaskState
+from a2a.types import AgentCard, GetTaskRequest, Role, SendMessageConfiguration
+from a2a.types import SendMessageRequest, Task, TaskState
 from a2a.utils.errors import A2AError
 from langgraph.types import interrupt
 
+from seamkit.cards import card_digest
 from seamkit.contract import (
     NO_CROSSING,
     Breach,
@@ -54,6 +55,7 @@ from seamkit.errors import (
     SeamError,
     TaskUnfinished,
 )
+from seamkit.ledger import LedgerEntry, intended, observe, unanswered
 from seamkit.trust import (
     Gradient,
     PartnerTrust,
@@ -77,6 +79,7 @@ OUTCOMES: dict[int, type[SeamError] | None] = {
     TaskState.TASK_STATE_UNSPECIFIED: MalformedAnswer,
 }
 
+COMPLETED = TaskState.TASK_STATE_COMPLETED
 INPUT_REQUIRED = TaskState.TASK_STATE_INPUT_REQUIRED
 
 
@@ -91,6 +94,7 @@ class SeamSpec:
     receives: Mapping[str, str]  # artifact key -> state field
     asks_caller: bool = False  # input-required goes to the caller's own interrupt()
     timeout: float = 10.0  # seconds before a send counts as PartnerUnavailable
+    return_immediately: bool = False  # the send returns once the task exists
     # artifact key -> the shape the seam depends on, from its expectations (Chapter 4)
     shapes: Mapping[str, Field] = field(default_factory=dict)
 
@@ -211,6 +215,7 @@ class CrossingRecord:
     task_id: str = ""
     state: str = ""
     error: str = ""
+    idempotency_key: str = ""  # joins a crossing to its ledger entry
 
 
 crossing_logger = logging.getLogger("seamkit.crossing")
@@ -249,25 +254,39 @@ class RemoteAgentNode:
     authority: Callable[[], str] = field(default=lambda: "")
 
     async def __call__(self, state: Mapping[str, Any]) -> dict[str, Any]:
-        links = dict(state.get("thread_links", {}))
-        link = links.get(self.seam.name)
-        if link is None:  # first entry: one new task, in a context the partner mints
-            task = await self._send({k: state[k] for k in self.seam.sends})
-        else:  # re-entry: read the task already sent, never send a second one
-            task = await self._get(link["task_id"])
-            if self._waits_for_us(task):
-                reply = interrupt(question_of(task))  # Claims' own human answers
-                task = await self._send(reply, link)  # same task, same context
-        links[self.seam.name] = {"context_id": task.context_id, "task_id": task.id}
-        if authority := self.authority():  # the run's chain id, beside its task (Ch 6)
-            links[self.seam.name]["authority"] = authority
-        if self._waits_for_us(task):
-            return {"thread_links": links}  # checkpoint the link before interrupt()
-        return {**self._outcome(task), "thread_links": links,
-                "completed": [self.seam.name]}
+        name = self.seam.name
+        entry = state.get("ledger", {}).get(name)
+        if entry is None:  # the intent and its key are checkpointed before any send
+            return {"ledger": {name: self.intend()}}
+        if entry["state"] == "unknown":  # sent once, answer lost: never send it again
+            raise PartnerUnavailable(name, "sent, outcome unknown", entry["task_id"])
+        if not entry["task_id"]:
+            try:  # one superstep later: send under the key the checkpoint holds
+                task = await self._send({k: state[k] for k in self.seam.sends}, entry,
+                                        key=entry["idempotency_key"])
+            except PartnerUnavailable:  # record the attempt, then stop on re-entry
+                return {"ledger": {name: unanswered(entry)}}
+        else:  # a task exists: read it, never send a second one
+            task = await self._get(entry["task_id"])
+            if self._waits_for_us(task) and entry["state"] == "input-required":
+                reply = interrupt(question_of(task))  # asked only once it is recorded
+                task = await self._send(reply, entry)  # same task, same context
+        seen = observe(entry, task, self.partner.release)
+        if task.status.state == COMPLETED:
+            answer = self._outcome(task)
+            return {**answer, "ledger": {name: {**seen, "wrote": sorted(answer)}},
+                    "completed": [name]}
+        if seen["state"] != entry["state"]:  # record what came back, map it next entry
+            return {"ledger": {name: seen}}
+        return self._outcome(task)  # unchanged and unfinished: raises, task recorded
+
+    def intend(self) -> LedgerEntry:
+        """The first version of this seam's entry: nothing sent yet, a key minted."""
+        return intended(self.seam.name, self.seam.skill, card_digest(self.partner.card),
+                        self.authority(), self.partner.release)
 
     async def call_once(self, data: Mapping[str, Any]) -> dict[str, Any]:
-        """One task and no thread link: the tool call shape (seamkit.tools).
+        """One task and no ledger entry: the tool call shape (seamkit.tools).
 
         An argument the model left unset does not cross: only what it chose is sent.
         """
@@ -304,26 +323,32 @@ class RemoteAgentNode:
         (record.clean if clean else record.malformed).add(task_id)
 
     async def _send(self, data: Mapping[str, Any],
-                    link: Mapping[str, str] | None = None) -> Task:
+                    link: Mapping[str, Any] | None = None,
+                    key: str | None = None) -> Task:
         if why := self.partner.refuses(self.seam.skill):  # the card trust policy
-            self.log(self._record("send", tuple(data))(error=CardUntrusted.__name__))
+            self.log(self._record("send", tuple(data), key or "")(
+                error=CardUntrusted.__name__))
             raise CardUntrusted(self.seam.name, why)
         if self.partner.breaches:  # held per seam: this one stops, the others run
-            self.log(self._record("send", tuple(data))(error=ContractBreach.__name__))
+            self.log(self._record("send", tuple(data), key or "")(
+                error=ContractBreach.__name__))
             raise ContractBreach(
                 self.seam.name, "; ".join(b.detail for b in self.partner.breaches))
         message = new_data_message(
             dict(data), role=Role.ROLE_USER,
-            context_id=link["context_id"] if link else None,
-            task_id=link["task_id"] if link else None)
+            context_id=(link or {}).get("context_id") or None,
+            task_id=(link or {}).get("task_id") or None)
+        if key:  # the sender chooses a message's id; ours is the ledger's key
+            message.message_id = key
         # A2A messages carry no skill field; the skill id travels in metadata.
         message.metadata.update({"skill": self.seam.skill})
-        record = self._record("send", tuple(data))
+        request = SendMessageRequest(message=message, configuration=(
+            SendMessageConfiguration(return_immediately=self.seam.return_immediately)))
+        record = self._record("send", tuple(data), key or "")
         task: Task | None = None
         try:
             async for event in self.partner.client.send_message(
-                    SendMessageRequest(message=message),
-                    context=ClientCallContext(timeout=self.seam.timeout)):
+                    request, context=ClientCallContext(timeout=self.seam.timeout)):
                 if event.HasField("task"):
                     task = event.task
         except DelegationRefused as exc:  # refused on our side: nothing was sent
@@ -365,10 +390,10 @@ class RemoteAgentNode:
                         state=TaskState.Name(task.status.state)))
         return task
 
-    def _record(self, call: str,
-                sent: tuple[str, ...]) -> Callable[..., CrossingRecord]:
+    def _record(self, call: str, sent: tuple[str, ...],
+                key: str = "") -> Callable[..., CrossingRecord]:
         def finish(**result: str) -> CrossingRecord:
             return CrossingRecord(self.seam.name, self.seam.owner, self.partner.release,
-                                  call, sent, **result)
+                                  call, sent, idempotency_key=key, **result)
 
         return finish
