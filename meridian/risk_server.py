@@ -107,6 +107,14 @@ RISK_TERMS_2027_04 = replace(
 # signs the head of Claims' receipt log daily. Risk's file names the evidence terms.
 RISK_TERMS_2027_06 = revised(RISK_TERMS_2027_04, Path(__file__).parent / "contracts"
                              / "risk.2027.06.toml")
+# The closer's hub shape: release 2027.08 reads the estimate history Claims sends as a
+# fifth input, and accepts the estimate class to read it. Risk then calls nobody.
+_HUB = revised(RISK_TERMS_2027_06, Path(__file__).parent / "contracts"
+               / "risk.2027.08.toml")
+RISK_TERMS_2027_08 = replace(
+    _HUB, accepts=_HUB.accepts | {"estimate"},
+    skills={"screen_fraud": replace(_HUB.skills["screen_fraud"], inputs=(
+        *_HUB.skills["screen_fraud"].inputs, Field("estimate_history", "object[]")))})
 
 
 def risk_card(release: str, terms: SeamTerms = RISK_TERMS,
@@ -123,7 +131,7 @@ RELEASED: tuple[tuple[str, SeamTerms], ...] = (
     ("2026.09", RISK_TERMS), ("2026.10", RISK_TERMS), ("2026.10", RISK_TERMS_0_1),
     ("2026.11", RISK_TERMS), ("2026.12", RISK_TERMS), ("2027.02", RISK_TERMS_2027_02),
     ("2027.03", RISK_TERMS_2027_02), ("2027.04", RISK_TERMS_2027_04),
-    ("2027.06", RISK_TERMS_2027_06))
+    ("2027.06", RISK_TERMS_2027_06), ("2027.08", RISK_TERMS_2027_08))
 PUBLISHED_DIGESTS = frozenset(card_digest(risk_card(*release)) for release in RELEASED)
 
 

@@ -1,0 +1,31 @@
+# Claims' federation gateway: every seam Claims sends on, read once at start. Claims
+# owns this file. The seams are in the order the claims graph sends on them.
+owner = "Claims"
+workload = "claims"
+ownership = "../../ownership.toml"
+
+# Meridian's policy for an outbound seam: what it must carry before it may start. A
+# seam's [seams.<name>.waive] table lets it off one control, with the reason a reviewer
+# reads; anything missing and not waived stops the gateway at start.
+requires = ["contract", "trust", "chain", "revocation", "ingress", "ledger", "breaker",
+            "receipts", "budget", "evidence"]
+
+[seams.fraud_screening]
+expects = "fraud_screening.toml"
+url = "http://risk.meridian.test/"
+# Risk may ask Northgate for the history of the claim it is screening, once
+grant = { skills = ["screen_fraud", "estimate_history"], also = ["police_report"], hops = 1 }
+
+[seams.repair_estimate]
+expects = "repair_estimate.toml"
+url = "http://northgate.example.test/"
+grant = { skills = ["estimate_repair"], hops = 0 }
+
+[seams.payments]
+expects = "payments.toml"
+url = "http://finance.meridian.test/"
+grant = { skills = ["pay_claim"], also = ["approved", "approval"], hops = 0 }
+
+[seams.payments.waive]
+budget = "Finance states no price per payment; Claims pays the claim, not the call"
+evidence = "Finance's terms state none; the payment ledger is Finance's book of record"

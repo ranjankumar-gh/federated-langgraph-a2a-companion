@@ -1,0 +1,50 @@
+# Claims' expectations of Northgate's estimate_history, in the hub shape (the closer):
+# Claims asks for the history of every claim it screens. Claims owns this file.
+seam = "estimate_history"
+owner = "Northgate"
+skill = "estimate_history"
+protocols = ["1.0"]  # Chapter 15: newest first; a card offering none is a breach
+sends = ["claim_id"]  # v7.6 reads nothing else for a claim
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+revocation_seconds = 120  # the longest a revoked chain may act at Northgate
+slo_seconds = 10.0
+receipts = "countersigned"  # Northgate signs its half of every receipt from v7.5
+
+[breaker]  # counts only Northgate's failures to answer, as on the estimate seam
+late_seconds = 4.0  # Northgate promises 2 s at p95
+failures = 3
+window_seconds = 60
+open_seconds = 300
+trial = "estimate_history"  # a history read changes nothing at Northgate
+max_in_flight = 4
+mode = "hold"  # no claim is screened without the history Risk now reads
+
+[reads.shop]
+into = "history_shop"
+type = "string"
+pattern = "SHOP-[0-9]+"
+
+[reads.estimates]  # closed: every row keeps only the keys named here
+into = "estimate_history"
+type = "object[]"
+
+[reads.estimates.items.part]
+type = "string"
+pattern = "[a-z]+"
+
+[reads.estimates.items.amount]
+type = "number"
+
+[budget]  # Northgate's terms price a history read at 0.5 a task
+per_task = 0.5
+window_days = 28
+alert = 0.8
+
+[budget.lines]
+claim = 150.0  # 300 screenings in 28 days, one history read each (a design value)
+
+[evidence]  # what Claims needs Northgate to keep, as on the estimate seam
+retain_days = 2555  # seven years
+produce_within_days = 14
+witness = "daily"

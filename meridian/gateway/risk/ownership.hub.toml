@@ -1,0 +1,22 @@
+# Risk's ownership map in the hub shape (the closer): the one seam Risk serves. Risk
+# calls nobody, so its map names no partner of its own. Risk owns this file.
+owner = "Risk"
+oncall = "risk-oncall"
+
+[routes]
+breaker = ["caller", "callee"]
+stop = ["caller", "callee"]
+drift = ["caller", "callee"]
+reconcile = ["caller"]
+residue = ["caller"]
+push = ["caller"]
+receipt = ["caller", "callee"]
+slo = ["caller", "callee"]
+cost = ["caller", "callee"]
+evidence = ["caller", "callee"]
+
+[seams.fraud_screening]  # the seam Risk serves: its caller is Claims
+caller = "Claims"
+callee = "Risk"
+caller_oncall = "claims-oncall"
+callee_contact = "risk-oncall"

@@ -91,9 +91,15 @@ def costs(callee: str) -> dict[str, str]:
     return out
 
 
+# The closer: the rerun record that replaced a record, by callee. Chapter 2's records
+# stay where they are; one changes only its status.
+SUPERSEDED = {"estimate_history": "rerun/estimate_history.md"}
+
+
 def records(facts: Mapping[str, OwnerFacts] = FACTS) -> list[DecisionRecord]:
     return [DecisionRecord(c, federation_test(c), costs(c.callee), SHAPE[c.callee],
-                           PAGED[c.callee], REVISIT[c.callee])
+                           PAGED[c.callee], REVISIT[c.callee],
+                           SUPERSEDED.get(c.callee, ""))
             for c in meridian_candidates(facts)]
 
 

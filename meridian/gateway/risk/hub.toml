@@ -1,0 +1,12 @@
+# Risk's federation gateway in the hub shape (the closer): Risk serves the screening and
+# sends on no seam; the estimate history arrives in Claims' request. Risk owns this file.
+owner = "Risk"
+workload = "risk"
+ownership = "ownership.hub.toml"
+requires = ["contract", "trust", "chain", "revocation", "ingress", "ledger", "breaker",
+            "receipts", "budget", "evidence"]
+
+[serves]
+audience = "risk"
+countersigns = true
+meters = true

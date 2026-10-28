@@ -1,0 +1,33 @@
+# Claims' federation gateway in the hub shape (the closer's rerun): Claims asks
+# Northgate for the estimate history of every claim it screens, before screening, and
+# sends it to Risk as a fifth field. Claims owns this file.
+owner = "Claims"
+workload = "claims"
+ownership = "ownership.hub.toml"
+requires = ["contract", "trust", "chain", "revocation", "ingress", "ledger", "breaker",
+            "receipts", "budget", "evidence"]
+
+[seams.estimate_history]
+expects = "estimate_history.toml"
+url = "http://northgate.example.test/"
+grant = { skills = ["estimate_history"], hops = 0 }
+
+[seams.fraud_screening]
+expects = "fraud_screening.hub.toml"
+url = "http://risk.meridian.test/"
+# Risk calls nobody in the hub shape: its link may pass nothing on
+grant = { skills = ["screen_fraud"], also = ["police_report"], hops = 0 }
+
+[seams.repair_estimate]
+expects = "repair_estimate.toml"
+url = "http://northgate.example.test/"
+grant = { skills = ["estimate_repair"], hops = 0 }
+
+[seams.payments]
+expects = "payments.toml"
+url = "http://finance.meridian.test/"
+grant = { skills = ["pay_claim"], also = ["approved", "approval"], hops = 0 }
+
+[seams.payments.waive]
+budget = "Finance states no price per payment; Claims pays the claim, not the call"
+evidence = "Finance's terms state none; the payment ledger is Finance's book of record"

@@ -1,0 +1,47 @@
+# Claims' ownership map in the hub shape (the closer): the map Claims keeps once it calls
+# Northgate's estimate_history itself. Otherwise the same as meridian/ownership.toml.
+# Claims' ownership map: every seam Claims calls, and who hears each signal it raises.
+# Claims owns this file. "caller" is Claims' on-call, "callee" the partner's contact,
+# and any other name is a queue a person works.
+owner = "Claims"
+oncall = "claims-oncall"
+
+[routes]  # every seam, unless its entry says otherwise
+breaker = ["caller", "callee"]  # the partner is failing to answer: tell it
+stop = ["caller", "callee"]  # a stop is Claims' decision about the partner
+drift = ["caller", "callee"]  # the partner's behaviour moved under its card
+reconcile = ["caller"]  # Claims' ledger against the partner's tasks
+residue = ["caller", "claims-recoveries"]  # money owed, or an undo refused
+push = ["caller"]  # a forged or flooding push is Claims' receiver's problem
+receipt = ["caller", "callee"]  # a mismatch is a dispute: both owners hear it
+slo = ["caller", "callee"]  # a promise one team made another
+cost = ["caller", "callee"]  # Chapter 18: what a task cost is both owners' to know
+evidence = ["caller", "callee"]  # Chapter 19: a gap in the pack is both owners' to hear
+
+[seams.fraud_screening]
+callee = "Risk"
+callee_contact = "risk-oncall"
+
+[seams.repair_estimate]
+callee = "Northgate"
+callee_contact = "northgate-support, via the partner manager"
+
+[seams.repair_booking]
+callee = "Northgate"
+callee_contact = "northgate-support, via the partner manager"
+
+[seams."repair_booking.undo"]
+callee = "Northgate"
+callee_contact = "northgate-support, via the partner manager"
+
+[seams.payments]
+callee = "Finance"
+callee_contact = "finance-oncall"
+
+[seams."payments.undo"]
+callee = "Finance"
+callee_contact = "finance-oncall"
+
+[seams.estimate_history]  # the closer's hub shape: Claims calls it, so Claims' map names Northgate
+callee = "Northgate"
+callee_contact = "northgate-support, via the partner manager"

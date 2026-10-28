@@ -1,0 +1,24 @@
+# Risk's federation gateway in the peer shape Chapter 2 chose: the screening Risk
+# serves, and the one seam Risk sends on, Northgate's estimate_history, which Risk's
+# fraud assistant calls as a tool. Risk owns this file.
+owner = "Risk"
+workload = "risk"
+ownership = "../../ownership_risk.toml"
+# Meridian's policy for an outbound seam, the same list Claims' gateway holds to
+requires = ["contract", "trust", "chain", "revocation", "ingress", "ledger", "breaker",
+            "receipts", "budget", "evidence"]
+
+[serves]  # what Risk's server runs before its screening graph sees a call
+audience = "risk"
+countersigns = true  # a CI rule inside Meridian
+meters = true  # release 2027.04: a signed usage report on every task
+
+[seams.estimate_history]
+expects = "estimate_history.toml"
+url = "http://northgate.example.test/"
+shape = "tool"  # a model, not the graph, decides whether Risk asks
+grant = { skills = ["estimate_history"], hops = 0 }
+
+[seams.estimate_history.waive]
+ledger = "a tool call has no thread to link; the task is in Risk's crossing records"
+budget = "Northgate prices a history read at 0.5; Risk budgets nothing per call"

@@ -1,0 +1,14 @@
+# Risk's terms, revision 2027.08: what changes from 2027.06 for the closer's hub shape.
+# Risk owns this file. The screening reads one more field, the estimate history Claims
+# now sends, and Risk accepts estimate data from Claims to read it.
+revision = "2027.08"
+effective = 2027-08-02
+
+[evidence]  # unchanged from 2027.06
+retain_days = 2555  # seven years
+produce_within_days = 5
+witness = "daily"
+
+[skills.screen_fraud]
+reads = ["claim_id", "amount", "days_to_report", "prior_claims", "estimate_history"]
+regions = ["home"]

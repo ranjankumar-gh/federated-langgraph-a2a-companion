@@ -29,11 +29,15 @@ class ClaimState(TypedDict, total=False):
     covered_parts: list[str]
     fraud_score: float  # 0-100: the scale the Claims threshold was written against
     fraud_signals: list[str]
+    screening_basis: str  # what Risk's screening was made from (Risk 2027.02)
     repair_estimate: float
     estimate_notes: str  # the shop's notes, through Northgate: partner text (Chapter 8)
     note_findings: dict[str, Any]  # what the quarantined reader found, closed
     payment_memo: str  # the remittance memo Finance prints on the payment
     payment_ref: str
+    # The closer's hub shape: the estimate history Claims reads from Northgate
+    history_shop: str
+    estimate_history: list[dict[str, Any]]
     decision: str  # "paid" or "refer"
     completed: Annotated[list[str], operator.add]
     # seam -> Claims' record of the task it sent there; merged with a version check

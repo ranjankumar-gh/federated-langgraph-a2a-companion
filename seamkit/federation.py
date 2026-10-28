@@ -10,7 +10,7 @@ deployed behind a seam: it finds a remote call with one owner on both sides, and
 owner crossing still running in-process.
 """
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -147,6 +147,7 @@ class DecisionRecord:
     shape: str = ""
     paged: str = ""
     revisit: str = ""
+    superseded_by: str = ""  # the closer: the rerun record that replaced this one
 
     def render(self) -> str:
         c, v = self.candidate, self.verdict
@@ -163,7 +164,8 @@ class DecisionRecord:
         return TEMPLATE.format(
             caller=c.caller, callee=c.callee,
             caller_owner=c.caller_facts.owner, callee_owner=c.callee_facts.owner,
-            status="accepted" if seam else "refused as a seam",
+            status=(f"superseded by {self.superseded_by}" if self.superseded_by
+                    else "accepted" if seam else "refused as a seam"),
             answer_rows="\n".join(
                 f"| {q} | {'yes' if yes else 'no'} | {why} |"
                 for q, (yes, why) in v.answers.items()),
@@ -173,3 +175,123 @@ class DecisionRecord:
             or "- none recorded",
             shape=self.shape or "-", paged=self.paged or "nobody",
             revisit=self.revisit or "-")
+
+
+# The rerun (the closer) ---------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Crossed:
+    """What crossed a seam, by field name: sent, from the receipts the caller signed,
+    and let back, from the caller's ingress rules. Never values."""
+
+    sent: tuple[str, ...]
+    answered: tuple[str, ...]
+    chosen: bool  # a model chose which tasks to send, so the choosing itself is a signal
+
+
+@dataclass(frozen=True)
+class Line:
+    """One predicted cost beside what was measured, or a line the record lacked."""
+
+    name: str
+    predicted: str  # "" for a line the record never had
+    measured: str
+
+
+@dataclass(frozen=True)
+class Rerun:
+    """A decision record asked again with what its seam measured."""
+
+    record: DecisionRecord
+    option_holds: bool
+    shape_holds: bool
+    why_shape: str
+    lines: tuple[Line, ...]
+    open: tuple[str, ...] = ()  # what the seam still leaves open: waivers and gaps
+    finding: str = ""
+
+    @property
+    def seam(self) -> str:
+        return self.record.candidate.callee
+
+    def render(self) -> str:
+        c, v = self.record.candidate, self.record.verdict
+        rows = "\n".join(f"| {ln.name} | {ln.predicted or '(not predicted)'} | "
+                         f"{ln.measured} |" for ln in self.lines)
+        held = "\n".join(f"- {gap}" for gap in self.open) or "- nothing"
+        return RERUN.format(
+            caller=c.caller, callee=c.callee, option=v.option,
+            option_verdict="holds" if self.option_holds else "fails",
+            shape=self.record.shape or "-",
+            shape_verdict="Holds" if self.shape_holds else "Fails",
+            why_shape=self.why_shape, rows=rows, open=held,
+            finding=self.finding or "The record stands, with the lines above added.")
+
+
+RERUN = """\
+# Federation rerun: {caller} -> {callee}
+
+Reruns: ../{callee}.md, with the numbers its seam measured end to end.
+
+## Option
+{option}: {option_verdict}. The four answers come from the same owner facts.
+
+## Shape
+Recorded: {shape}
+
+{shape_verdict}. {why_shape}
+
+## Predicted against measured
+| Line | Predicted | Measured |
+|---|---|---|
+{rows}
+
+## Still open
+{open}
+
+## Finding
+{finding}
+"""
+
+
+def shape_holds(record: DecisionRecord, crossed: Crossed,
+                kept: Collection[str]) -> tuple[bool, str]:
+    """Ask Chapter 2's data-boundary question again, of what crossed, not what might.
+
+    A peer shape is kept off the hub to keep something of the peer's own out of the
+    hub's state. It holds only if something the peer keeps did cross, or would cross
+    if the hub made the call. A model's choice of which tasks to send is such a thing;
+    a hub that sends one task for every claim carries no choice.
+    """
+    if not record.shape.startswith("peer"):
+        return True, "The hub sends it, as the record says."
+    crossing = sorted((set(crossed.sent) | set(crossed.answered)) & set(kept))
+    if crossing:
+        return True, f"The hub would carry {_and(crossing)} into its own state."
+    why = (f"Only {_and(crossed.sent)} crossed out and {_and(crossed.answered)} came "
+           f"back, none of {_and(sorted(kept))}.")
+    if crossed.chosen:
+        why += (" Which claims were sent was a model's choice, so the choosing is the "
+                "one signal that would cross; a hub that asks for every claim it "
+                "screens carries none.")
+    return False, why
+
+
+def _and(names: Sequence[str]) -> str:
+    """Names in prose: "a", "a and b", "a, b, and c"."""
+    items = list(names)
+    if len(items) < 3:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def rerun(record: DecisionRecord, lines: Sequence[Line], crossed: Crossed | None,
+          kept: Collection[str] = (), open_: Sequence[str] = (),
+          finding: str = "") -> Rerun:
+    """The record asked again: the option from its facts, the shape from what crossed."""
+    option = federation_test(record.candidate).option == record.verdict.option
+    if record.verdict.option != "a2a_agent":
+        holds, why = True, "Not a seam: nothing crosses, and nothing is measured."
+    else:
+        holds, why = shape_holds(record, crossed or Crossed((), (), False), kept)
+    return Rerun(record, option, holds, why, tuple(lines), tuple(open_), finding)

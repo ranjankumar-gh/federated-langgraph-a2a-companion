@@ -1,0 +1,38 @@
+# Claims' expectations of Finance's pay_claim, every table in one file: the closer's
+# gateway reads this one. The chapters' variant files stay as they were.
+seam = "payments"
+owner = "Finance"
+skill = "pay_claim"
+sends = ["claim_id", "amount", "repair_estimate", "payment_memo"]
+answers = ["approval"]  # a payment over 2,500 needs a Claims approver (Finance 2026.12)
+roles = ["claims/claims_manager"]  # the only Claims person Finance may ask
+wait_seconds = 259200  # 72 h: the longest Claims waits on Finance's own people
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+slo_seconds = 10.0
+delivery = "push"  # Finance's approvers take hours or days
+backstop_seconds = 3600  # one read an hour: 72 over the 72-hour wait horizon
+
+[breaker]  # Chapter 14: a payment holds; nobody pays in Finance's place
+late_seconds = 6.0  # Finance promises 3 s at p95
+failures = 3
+window_seconds = 60
+open_seconds = 600
+trial = "pay_claim"
+max_in_flight = 4
+mode = "hold"
+
+[retry]  # resends only under a key Finance's terms honour, and inside its window
+attempts = 3  # the first send and two more, every one under the entry's key
+deadline_seconds = 600  # no resend later than ten minutes after the first send
+
+[reads.payment_ref]
+into = "payment_ref"
+type = "string"
+pattern = "PAY-CLM-[0-9]{4}-[0-9]+"  # closed: a reference, never a sentence
+
+[slo]  # Chapter 17: the partner's promise, measured by Claims on the shared clock
+target = 0.95  # Finance promises 3 s at p95: 95 sends in 100 inside it
+seconds = 3.0
+window_days = 28  # a design value for Meridian, not a benchmark
+alert = 0.5  # half the window's budget spent pages both owners

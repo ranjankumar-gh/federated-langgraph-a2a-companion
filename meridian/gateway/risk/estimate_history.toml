@@ -1,0 +1,46 @@
+# Risk's expectations of Northgate's estimate_history, the peer seam. Risk owns this
+# file; it holds what Risk's tool client had in code (Chapters 6, 8, 14, 17 and 19).
+seam = "estimate_history"
+owner = "Northgate"
+skill = "estimate_history"
+protocols = ["1.0"]
+sends = ["claim_id"]  # v7.6 reads nothing else for a claim
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+revocation_seconds = 120
+slo_seconds = 10.0
+receipts = "countersigned"  # Northgate signs its half from v7.5 (Chapter 19)
+
+[breaker]  # Chapter 14: Risk's own breaker, nearer the cause than Claims' on Risk
+late_seconds = 4.0
+failures = 3
+window_seconds = 60
+open_seconds = 300
+trial = "estimate_history"
+max_in_flight = 4
+mode = "substitute"  # Risk screens without the history, and says so in basis
+
+[reads.shop]  # Chapter 8: every field closed, rows keep only the keys Risk names
+into = "shop"
+type = "string"
+pattern = "SHOP-[0-9]+"
+
+[reads.estimates]
+into = "estimates"
+type = "object[]"
+
+[reads.estimates.items.claim_id]
+type = "string"
+pattern = "CLM-[0-9]{4}"
+
+[reads.estimates.items.part]
+type = "string"
+pattern = "[a-z]+"
+
+[reads.estimates.items.amount]
+type = "number"
+
+[evidence]  # Chapter 19: what Risk needs Northgate to keep for Risk's own pack
+retain_days = 2555
+produce_within_days = 14
+witness = "daily"

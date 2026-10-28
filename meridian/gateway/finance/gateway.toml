@@ -1,0 +1,9 @@
+# Finance's federation gateway: the payments it serves. Finance sends on no seam.
+# Finance owns this file.
+owner = "Finance"
+workload = "finance"
+requires = []
+
+[serves]
+audience = "finance"
+countersigns = true  # a CI rule inside Meridian

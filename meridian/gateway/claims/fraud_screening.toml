@@ -1,0 +1,61 @@
+# Claims' expectations of Risk's screen_fraud, every table in one file: the closer's
+# gateway reads this one. The chapters' variant files in meridian/expectations/ stay as
+# they were, so the earlier federations and their tests are unchanged.
+seam = "fraud_screening"
+owner = "Risk"
+skill = "screen_fraud"
+protocols = ["1.0"]  # Chapter 15: newest first; a card offering none is a breach
+sends = ["claim_id", "amount", "days_to_report", "prior_claims"]
+answers = ["police_report"]  # a Claims adjuster answers it
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+slo_seconds = 10.0
+delivery = "stream"  # a blocking send: one answer, seconds long
+lookup = true  # Risk honours no key: look it up before a send, in case one left
+notice_days = 21  # Chapter 15: a breaking revision is on the card 3 weeks ahead
+
+[breaker]  # Chapter 14: counts only Risk's failures to answer, never what Risk decides
+late_seconds = 8.0  # Risk promises 5 s at p95
+failures = 5  # slower to open than Risk's own breaker on Northgate, which trips at 3
+window_seconds = 60
+open_seconds = 120
+trial = "screen_fraud"  # a screening changes nothing at Risk: any claim may trial
+max_in_flight = 8
+mode = "hold"  # a claim is never cleared unscreened
+
+[canary]  # Chapter 15: three golden screenings, judged against the baseline
+every_seconds = 3600  # hourly: screening is Meridian's own, with no price per task
+absolute = 2.0  # a score may move 2 points on 0-100
+confirm = 1  # a wrong score clears fraud: one run out of band is drift
+on_drift = "hold"  # no claim is screened, and none cleared, until a person decides
+
+[reads.fraud_score]
+into = "fraud_score"
+type = "number"
+bounds = [0, 100]  # the referral threshold of 70 is written on this scale
+
+[reads.basis]  # how Risk made this screening: closed to the two values its terms state
+into = "screening_basis"
+type = "string"
+choices = ["full", "without estimate history"]
+
+[slo]  # Chapter 17: the partner's promise, measured by Claims on the shared clock
+target = 0.95  # Risk promises 5 s at p95: 95 sends in 100 inside it
+seconds = 5.0
+window_days = 28  # a design value for Meridian, not a benchmark
+alert = 0.5  # half the window's budget spent pages both owners
+
+[budget]  # Chapter 18: what a screening may cost Claims, charged back by Finance
+per_task = 1.0  # the ceiling sent with every screening, in claim currency
+window_days = 28  # the SLO's window, on the same clock
+alert = 0.8  # a line 80% spent signals both owners
+
+[budget.lines]  # Risk's usage, priced by Meridian's rate card (design values)
+claim = 1_400.0  # about 50 screenings a day at the ceiling
+canary = 1_500.0  # three goldens hourly: 72 a day
+retry = 50.0  # Risk honours no key: every resend is a screening read again
+
+[evidence]  # Chapter 19: what Claims needs Risk to keep, for what an auditor asks
+retain_days = 2555  # seven years, the longest a claim is contested
+produce_within_days = 14  # the regulator's deadline for a pack
+witness = "daily"  # Risk signs the head of Claims' receipt log every day

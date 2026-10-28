@@ -18,6 +18,8 @@ DATA_CLASSES: dict[str, str] = {
     "repair_estimate": "estimate", "estimate_notes": "estimate",
     "note_findings": "estimate", "payment_memo": "estimate",
     "policy": "policy",
+    # The closer's hub shape: a shop's past estimates for the claim's parts
+    "history_shop": "estimate", "estimate_history": "estimate",
 }
 
 # One crossing rule per partner. Northgate is another company: it sees the claim and the
@@ -39,3 +41,9 @@ STAYS_IN_STRICT: dict[str, frozenset[str]] = {**STAYS_IN,
 
 MERIDIAN_POLICY = CrossingPolicy(DATA_CLASSES, CROSSES_TO, STAYS_IN)
 STRICT_POLICY = CrossingPolicy(DATA_CLASSES, CROSSES_TO, STAYS_IN_STRICT)
+
+# The closer's hub shape: Claims sends Risk the estimate history it read from Northgate,
+# so the estimate class may now cross to Risk. Meridian's decision, like every rule here.
+HUB_CROSSES_TO: dict[str, frozenset[str]] = {
+    **CROSSES_TO, "Risk": CROSSES_TO["Risk"] | {"estimate"}}
+HUB_POLICY = CrossingPolicy(DATA_CLASSES, HUB_CROSSES_TO, STAYS_IN)

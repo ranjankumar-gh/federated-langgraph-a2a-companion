@@ -124,6 +124,9 @@ class MeridianIssuer:
     issued: dict[str, Link] = field(default_factory=dict)
     _list: RevocationList | None = None
     _undo: dict[str, Chain] = field(default_factory=dict)  # claim -> compensation root
+    # The closer: what an adjuster's root grants. The hub shape's root names one more
+    # field, the estimate history Claims now reads and sends on to Risk.
+    grant: Grant = ROOT
 
     def exchange(self, session: str) -> Chain:
         """An adjuster's session in, a root link addressed to Claims out."""
@@ -131,7 +134,7 @@ class MeridianIssuer:
             raise DelegationRefused("claims", "unknown or ended session")
         subject, claims = self.sessions[session]
         self.exchanges += 1
-        return self._root(subject, claims, self.now() + ROOT_LIFETIME)
+        return self._root(subject, claims, self.now() + ROOT_LIFETIME, self.grant)
 
     def _root(self, subject: str, claims: frozenset[str], expires: float,
               grant: Grant = ROOT) -> Chain:

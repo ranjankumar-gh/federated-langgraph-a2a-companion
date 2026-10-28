@@ -470,6 +470,37 @@ tests/test_ch18_invoice.py`.
 Run only this chapter's tests with `uv run pytest tests/test_ch19_evidence.py
 tests/test_ch19_terms.py`.
 
+### Closer: Assembling the Federation
+
+- `seamkit/gateway.py`: the federation gateway, one per owner. `GatewayConfig.load`
+  reads an owner's directory once; `Gateway.connect`, `outbound` (the node every chapter
+  extended, each control set from the seam's expectations), `tool` (a remote skill tool
+  with the controls a tool call can carry), `inbound` (the guard, list check, key index,
+  countersigner and meter around the owner's executor), `points` (each control with its
+  property and chapter), `check` (raises `UnguardedSeam` for a required control that is
+  neither on nor waived) and `inventory` (every column from the points).
+- `meridian/gateway/claims/`, `risk/`, `finance/`: each owner's `gateway.toml`, and one
+  expectations file per seam with every table in it. `hub.toml` and the `*.hub.toml`
+  files are the hub shape. The chapters' variant files in `meridian/expectations/` stay
+  as they were.
+- `meridian/assembled.py`: `assemble` (Claims, Risk 2027.06 or 2027.08, Northgate v7.6
+  and Finance 2026.15, each behind its own gateway; Northgate runs its own server),
+  `Assembled.run` (CLM-1001, CLM-1002 and CLM-1003 end to end, both approvers included)
+  and `measure` (each seam from the wire, receipts, cost entries and ledger entries).
+- `seamkit/federation.py`: `Crossed`, `Line`, `Rerun`, `shape_holds` and `rerun`;
+  `DecisionRecord.superseded_by`. `meridian/rerun.py`: Meridian's five records rerun.
+  `docs/decisions/rerun/`: the rerun records; `docs/decisions/estimate_history.md` is now
+  superseded by its rerun.
+- `meridian/risk_server.py`: Risk's terms revision 2027.08 (the estimate history as a
+  fifth input), from `meridian/contracts/risk.2027.08.toml`. `meridian/data_classes.py`:
+  `HUB_POLICY`. `meridian/identity.py`: `MeridianIssuer.grant`.
+- `tests/test_closer_gateway.py` and `tests/test_closer_rerun.py`.
+
+Run `uv run python -m meridian.assembled` to print both shapes' measurements (latency is
+wall time on the in-process wire, a floor), and `uv run python -m meridian.rerun` to
+rewrite the rerun records. Run only the closer's tests with `uv run pytest
+tests/test_closer_gateway.py tests/test_closer_rerun.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

@@ -1,0 +1,61 @@
+# Claims' expectations of Risk's screen_fraud in the hub shape (the closer): the four
+# fields and the estimate history Claims read from Northgate, under Risk's terms
+# revision 2027.08. Otherwise the same as fraud_screening.toml. Claims owns this file.
+seam = "fraud_screening"
+owner = "Risk"
+skill = "screen_fraud"
+protocols = ["1.0"]
+sends = ["claim_id", "amount", "days_to_report", "prior_claims", "estimate_history"]
+answers = ["police_report"]
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+slo_seconds = 10.0
+delivery = "stream"
+lookup = true
+notice_days = 21
+
+[breaker]
+late_seconds = 8.0
+failures = 5
+window_seconds = 60
+open_seconds = 120
+trial = "screen_fraud"
+max_in_flight = 8
+mode = "hold"
+
+[canary]
+every_seconds = 3600
+absolute = 2.0
+confirm = 1
+on_drift = "hold"
+
+[reads.fraud_score]
+into = "fraud_score"
+type = "number"
+bounds = [0, 100]
+
+[reads.basis]
+into = "screening_basis"
+type = "string"
+choices = ["full", "without estimate history"]
+
+[slo]
+target = 0.95
+seconds = 5.0
+window_days = 28
+alert = 0.5
+
+[budget]
+per_task = 1.0
+window_days = 28
+alert = 0.8
+
+[budget.lines]
+claim = 1_400.0
+canary = 1_500.0
+retry = 50.0
+
+[evidence]
+retain_days = 2555
+produce_within_days = 14
+witness = "daily"

@@ -1,6 +1,6 @@
 # Federation decision: fraud_screening -> estimate_history
 
-Status: accepted
+Status: superseded by rerun/estimate_history.md
 
 ## Context
 fraud_screening (Risk) calls estimate_history (Northgate).
