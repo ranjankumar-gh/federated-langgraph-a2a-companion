@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from seamkit.approval import Approval, sign_approval
 from seamkit.delegation import Chain, Grant, Link, Trust, chain_id, run_value, sign
 from seamkit.errors import DelegationRefused
 from seamkit.revocation import (
@@ -40,9 +41,19 @@ MERIDIAN_TRUSTS: Mapping[str, Trust] = {ISSUER: MERIDIAN}
 ADJUSTER_SESSION = "session-adj-117"
 ADJUSTER = "adjuster:adj-117"
 
+# Chapter 10: two more Claims people, who approve payments but run no claims.
+MANAGER_SESSION, MANAGER = "session-mgr-204", "manager:mgr-204"
+LEAD_SESSION, LEAD = "session-lead-031", "lead:tl-031"
+
 # The issuer's own records: whose session it is, and which claims she is working.
 SESSIONS: dict[str, tuple[str, frozenset[str]]] = {
-    ADJUSTER_SESSION: (ADJUSTER, frozenset({"CLM-1001", "CLM-1002"}))}
+    ADJUSTER_SESSION: (ADJUSTER, frozenset({"CLM-1001", "CLM-1002"})),
+    MANAGER_SESSION: (MANAGER, frozenset()),
+    LEAD_SESSION: (LEAD, frozenset())}
+
+# Each person's role, as Meridian's directory records it: an approval states it.
+ROLES: dict[str, str] = {ADJUSTER: "claims/adjuster",
+                         MANAGER: "claims/claims_manager", LEAD: "claims/team_lead"}
 
 # Everything a Claims run may ever do on an adjuster's behalf, and two hops below it.
 ROOT = Grant(
@@ -50,7 +61,7 @@ ROOT = Grant(
                       "pay_claim"}),
     fields=frozenset({"claim_id", "amount", "days_to_report", "prior_claims",
                       "damaged_parts", "repair_estimate", "police_report",
-                      "payment_memo"}),
+                      "payment_memo", "approved", "approval"}),  # Ch 10: an answer
     hops=2)
 
 ROOT_LIFETIME = 15 * 60.0  # seconds; every link below expires no later
@@ -93,6 +104,19 @@ class MeridianIssuer:
                          ROOT.hops, expires), self.key)
         self.issued[chain_id((root,))] = root
         return (root,)
+
+    def approve(self, session: str, task_id: str, claim: str, amount: float,
+                asked: str) -> Approval:
+        """Chapter 10: the approver's own session in, a signed approval out.
+
+        The issuer names the person and her role from its own records; nothing she
+        types reaches either field.
+        """
+        if session not in self.sessions:
+            raise DelegationRefused("claims", "unknown or ended session")
+        subject, _ = self.sessions[session]
+        return sign_approval(Approval(ISSUER, subject, ROLES.get(subject, ""), task_id,
+                                      claim, amount, asked), self.key)
 
     def revoke(self, subject: str, at: float) -> RevocationList:
         """Suspend a person: end her sessions, drop her cached roots, sign a list."""

@@ -92,3 +92,12 @@ class UntrustedEgress(SeamError):
     A field a model wrote from a partner's text carries that text, and every data class
     of what the model read. Raised before anything is sent; only that seam stops.
     """
+
+
+class WaitExpired(SeamError):
+    """A task waited on the partner's own people longer than this seam's wait horizon.
+
+    Raised by Claims' resume gate after it asks the partner to cancel the task. The
+    claim goes to an adjuster, like every SeamError; approvals given on the task do not
+    carry over to any task that replaces it.
+    """

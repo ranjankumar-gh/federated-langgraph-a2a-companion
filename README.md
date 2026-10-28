@@ -183,6 +183,27 @@ Run only this chapter's tests with `uv run pytest tests/test_ch07_revocation.py`
 
 Run only this chapter's tests with `uv run pytest tests/test_ch08_ingress.py`.
 
+### Chapter 10: Interrupt, Resume, and the Human on the Other Side
+
+- `seamkit/server.py`: `ask(question, owner, role)` puts an addressee on an interrupt;
+  `GraphExecutor(own=...)` keeps a question for the partner's own people inside, with the task
+  `working`, and `answer` finishes it from the partner's inbox through `StoreWriter`, outside
+  any request, re-checking the chain at the commit act point.
+- `seamkit/approval.py`: the approval credential (`Approval`, `refuse_approval`).
+- `seamkit/resume.py`: the cross-owner resume state machine (`TRANSITIONS`, `resume_step`),
+  `wake`, the polling `sweep`, and the `fork` guard.
+- `seamkit/ledger.py`, `seamkit/remote.py`, `seamkit/contract.py`: the entry's `waiting_on`,
+  `since`, `asked` and `terms`; routing by `SeamSpec.roles`; the wait horizon
+  (`wait_seconds`) in both halves of the contract. `WaitExpired` is in `seamkit/errors.py`.
+- `meridian/resume.py`: Claims' resume gate asks `resume_step` before Chapter 7's `recheck`.
+- `meridian/finance_server.py`: release `2026.12`, two-party approval over 2,500
+  (`addressed=False` builds the opening incident), Finance's inbox (`approve`), and `ship`.
+  `meridian/identity.py`: `MeridianIssuer.approve`.
+- `tests/test_ch10_resume.py`: the incident, routing, approvals, every paused case, six days on
+  one clock, a card and a question that change while a person is away, and the fork.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch10_resume.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

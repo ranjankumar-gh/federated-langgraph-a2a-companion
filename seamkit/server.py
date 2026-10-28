@@ -5,6 +5,11 @@ becomes the partner's own thread_id, a data part becomes graph input (or a resum
 when the thread is paused), interrupt() becomes input-required, and the final state
 becomes one artifact. The caller never sees the partner's checkpoint.
 
+Since Chapter 10 a question can name who must answer it (`ask`). The executor keeps a
+question addressed to its own people inside: the task stays working, with a status
+message naming who it waits on and since when, and the partner's own inbox answers it
+later, from outside any request (`answer`). Only a question for the caller crosses.
+
 A partner that verifies delegation chains puts a Guard (seamkit.delegation) in front of
 this app. The guard leaves the verified chain in the request's auth, and the executor
 hands it to the partner's own run as config, never as state: a chain is a credential,
@@ -12,16 +17,18 @@ and a checkpoint is no place for one.
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from a2a.server.context import ServerCallContext
 
 from a2a.helpers import get_data_parts, new_data_part, new_task_from_user_message
 from a2a.server.agent_execution import AgentExecutor, RequestContext
-from a2a.server.events import EventQueue
+from a2a.server.events import Event, EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
-from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
+from a2a.server.tasks import InMemoryTaskStore, TaskManager, TaskStore, TaskUpdater
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
@@ -33,7 +40,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from jwt.algorithms import OKPAlgorithm
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -77,13 +84,16 @@ def agent_card(name: str, url: str, release: str, skills: Mapping[str, str],
 
 
 def a2a_app(card: AgentCard, executor: AgentExecutor,
-            extra: Sequence[BaseRoute] = ()) -> Starlette:
+            extra: Sequence[BaseRoute] = (),
+            store: TaskStore | None = None) -> Starlette:
     """A Starlette app serving the card and the JSON-RPC endpoint at the card's URL.
 
     `extra` adds routes beside them, such as the key set a card's signature names.
+    `store` is the task store, when the partner also writes tasks outside a request.
     """
     handler = DefaultRequestHandler(
-        agent_executor=executor, task_store=InMemoryTaskStore(), agent_card=card)
+        agent_executor=executor, task_store=store or InMemoryTaskStore(),
+        agent_card=card)
     routes = [*create_agent_card_routes(card), *extra,
               *create_jsonrpc_routes(handler, "/")]
     return Starlette(routes=routes)
@@ -104,17 +114,56 @@ def key_set_route(path: str, keys: Mapping[str, Ed25519PublicKey]) -> Route:
     return Route(path, key_set, methods=["GET"])
 
 
+def ask(question: Mapping[str, Any], owner: str, role: str) -> Any:
+    """interrupt(), with the one thing the protocol never says: who must answer."""
+    return interrupt({**question, "to": f"{owner}/{role}"})
+
+
+@dataclass(frozen=True)
+class Waiting:
+    """A task kept working on the partner's own people: what to resume it with."""
+
+    context_id: str
+    config: RunnableConfig  # the run's config, with the chain the task last held
+    to: str
+    since: str
+
+
+class StoreWriter(EventQueue):
+    """A queue with no request behind it: each event goes straight to the task store.
+
+    The SDK's way to run an executor's updates outside the framework is a subclass.
+    """
+
+    def __init__(self, store: TaskStore, task_id: str, context_id: str) -> None:
+        self.manager = TaskManager(store, ServerCallContext(), task_id, context_id,
+                                   None)
+
+    async def enqueue_event(self, event: Event) -> None:
+        await self.manager.process(event)
+
+
 class GraphExecutor(AgentExecutor):
-    """Serves one compiled graph over A2A. The graph keeps its own checkpointer."""
+    """Serves one compiled graph over A2A. The graph keeps its own checkpointer.
+
+    `own` is the partner's owner name: a question addressed to "own/..." never
+    crosses (Chapter 10). Empty keeps Chapter 3's mapping, where every interrupt does.
+    """
 
     def __init__(self, graph: AnyGraph, name: str,
                  to_input: Callable[[dict[str, Any]], Any],
                  to_artifact: Callable[[dict[str, Any]], dict[str, Any]],
                  configure: Callable[[ServerCallContext], dict[str, Any]] = (
-                     delegation_config)) -> None:
+                     delegation_config),
+                 own: str = "", store: TaskStore | None = None,
+                 now: Callable[[], float] | None = None) -> None:
         self.graph, self.name = graph, name
         self.to_input, self.to_artifact = to_input, to_artifact
         self.configure = configure
+        self.own, self.store = own, store or InMemoryTaskStore()
+        self.now = now
+        self.waiting: dict[str, Waiting] = {}  # task -> a question for our own people
+        self.held: dict[str, Any] = {}  # task -> an answer waiting on a fresh chain
         # The partner's own log of what it was asked: one entry per execution.
         self.received: list[dict[str, Any]] = []
         # Task ids whose execution has ended, finished or paused for an answer.
@@ -135,8 +184,11 @@ class GraphExecutor(AgentExecutor):
         # The caller's contextId is our thread_id. We minted it; the caller records it.
         call = context.call_context
         config: RunnableConfig = {"configurable": {"thread_id": context.context_id,
+                                                   "task_id": context.task_id,
                                                    **self.configure(call)}}
         data = get_data_parts(context.message.parts)[0]
+        if context.task_id in self.held:  # a renewal: resume with the held answer
+            data = self.held.pop(context.task_id)
         paused = (await self.graph.aget_state(config)).interrupts
         run = Command(resume=data) if paused else self.to_input(data)
         headers = call.state.get("headers", {})
@@ -147,20 +199,58 @@ class GraphExecutor(AgentExecutor):
                               "credential": headers.get("authorization", ""),
                               "chain": verified.chain_id if verified else "",
                               "subject": verified.subject if verified else ""})
+        await self._run(updater, run, config)
+
+    async def _run(self, updater: TaskUpdater, run: Any,
+                   config: RunnableConfig) -> None:
         try:
             out = await self.graph.ainvoke(run, config)
         except SeamError as exc:  # our own partner failed us: say so, typed
             await updater.failed(updater.new_agent_message(
                 [new_data_part({"error": type(exc).__name__, "detail": str(exc)})]))
             return
-        if out.get("__interrupt__"):  # interrupt() becomes input-required
+        if out.get("__interrupt__"):
             question = out["__interrupt__"][0].value
-            await updater.requires_input(updater.new_agent_message(
+            to = str(question.get("to", "")) if isinstance(question, dict) else ""
+            if self.own and to.startswith(f"{self.own}/"):  # ours: it never crosses
+                since = self._stamp()
+                self.waiting[updater.task_id] = Waiting(
+                    updater.context_id, config, to, since)
+                await updater.start_work(updater.new_agent_message(
+                    [new_data_part({"waiting_on": to, "since": since})]))
+                return
+            await updater.requires_input(updater.new_agent_message(  # the caller's
                 [new_data_part(question)]))
             return
         await updater.add_artifact([new_data_part(self.to_artifact(out))],
                                    name=self.name)
         await updater.complete()
+
+    def _stamp(self) -> str:
+        at = self.now() if self.now else datetime.now(UTC).timestamp()
+        return datetime.fromtimestamp(at, UTC).isoformat(timespec="seconds")
+
+    async def answer(self, task_id: str, answer: Any,
+                     holds: Callable[[RunnableConfig], str] | None = None) -> str:
+        """One of our own people answered, in our own inbox: no request carries it.
+
+        `holds` is the commit act point: does the chain the task last held still hold?
+        If not, the answer is kept and the task asks the caller for a fresh chain.
+        """
+        waiting = self.waiting.pop(task_id)
+        updater = TaskUpdater(StoreWriter(self.store, task_id, waiting.context_id),
+                              task_id, waiting.context_id)
+        why = holds(waiting.config) if holds else "ok"
+        if why == "revoked":  # final: Chapter 7's rule at the commit act point
+            await updater.cancel(updater.new_agent_message(
+                [new_data_part({"why": "delegation revoked"})]))
+        elif why != "ok":  # expired: renewable by the same person
+            self.held[task_id] = answer
+            await updater.requires_auth(updater.new_agent_message(
+                [new_data_part({"needs": "delegation", "why": f"chain {why}"})]))
+        else:
+            await self._run(updater, Command(resume=answer), waiting.config)
+        return why
 
     async def cancel(self, context: RequestContext, queue: EventQueue) -> None:
         assert context.task_id and context.context_id

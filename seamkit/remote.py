@@ -22,6 +22,8 @@ partner's question and a refusal reason are cleaned and capped before a person o
 log sees them.
 """
 
+import hashlib
+import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -73,7 +75,14 @@ from seamkit.ingress import (
     tag,
     withhold,
 )
-from seamkit.ledger import LedgerEntry, intended, observe, unanswered
+from seamkit.ledger import (
+    LedgerEntry,
+    intended,
+    moved,
+    observe,
+    question_digest,
+    unanswered,
+)
 from seamkit.trust import (
     Gradient,
     PartnerTrust,
@@ -117,6 +126,10 @@ class SeamSpec:
     shapes: Mapping[str, Field] = field(default_factory=dict)
     # state field -> its ingress rule (Chapter 8); None is a seam with no filter yet
     rules: Mapping[str, IngressRule] | None = None
+    # Chapter 10: the Claims roles a partner's question may be addressed to. Empty
+    # keeps Chapter 3's rule: whoever runs the thread answers what the seam answers.
+    roles: tuple[str, ...] = ()
+    wait_seconds: float | None = None  # how long Claims waits on a partner's people
 
 
 @dataclass(frozen=True)
@@ -169,6 +182,13 @@ class PartnerConnection:
 
 
 contract_logger = logging.getLogger("seamkit.contract")
+
+
+def terms_digest(connection: "PartnerConnection", skill: str) -> str:
+    """The skill's terms in force, hashed: what a resume compares if the card changes."""
+    held = connection.terms[0].skills.get(skill) if connection.terms else None
+    raw = json.dumps(asdict(held) if held else {}, sort_keys=True, default=str)
+    return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
 
 
 async def connect(url: str, http: httpx.AsyncClient,
@@ -266,7 +286,18 @@ def question_of(task: Task) -> dict[str, Any]:
     """
     parts = get_data_parts(task.status.message.parts)
     asked = quote(parts[0], QUESTION_MAX_CHARS) if parts else {}
-    return {"task_id": task.id, **asked, "partner_text": sorted(asked)}
+    # Chapter 10: the digest an approval of this question is bound to.
+    digest = question_digest(parts[0]) if parts else ""
+    return {"task_id": task.id, **asked, "partner_text": sorted(asked),
+            "asked": digest}
+
+
+def addressee(task: Task) -> str:
+    """Who the partner says a paused task waits on, "owner/role"; "" if it names none."""
+    message = task.status.message
+    parts = get_data_parts(message.parts) if message.parts else []
+    said = parts[0] if parts else {}
+    return str(said.get("to") or said.get("waiting_on") or "")
 
 
 @dataclass
@@ -302,14 +333,16 @@ class RemoteAgentNode:
             answer = self._outcome(task)
             return {**answer, "ledger": {name: {**seen, "wrote": sorted(answer)}},
                     "completed": [name]}
-        if seen["state"] != entry["state"]:  # record what came back, map it next entry
+        if moved(entry, seen):  # record what came back, map it next entry
             return {"ledger": {name: seen}}
         return self._outcome(task)  # unchanged and unfinished: raises, task recorded
 
     def intend(self) -> LedgerEntry:
         """The first version of this seam's entry: nothing sent yet, a key minted."""
-        return intended(self.seam.name, self.seam.skill, card_digest(self.partner.card),
-                        self.authority(), self.partner.release)
+        return {**intended(self.seam.name, self.seam.skill,
+                           card_digest(self.partner.card), self.authority(),
+                           self.partner.release),
+                "terms": terms_digest(self.partner, self.seam.skill)}
 
     async def call_once(self, data: Mapping[str, Any]) -> dict[str, Any]:
         """One task and no ledger entry: the tool call shape (seamkit.tools).
@@ -323,7 +356,12 @@ class RemoteAgentNode:
         return withhold(answer, self.seam.rules)  # a model that can act reads no text
 
     def _waits_for_us(self, task: Task) -> bool:
-        return self.seam.asks_caller and task.status.state == INPUT_REQUIRED
+        """A question is ours only if it names a role we answer for (Chapter 10)."""
+        if task.status.state != INPUT_REQUIRED:
+            return False
+        if not self.seam.roles:  # Chapter 3's rule, for seams that list no roles
+            return self.seam.asks_caller
+        return addressee(task) in self.seam.roles  # unaddressed: nobody's, refused
 
     def _outcome(self, task: Task) -> dict[str, Any]:
         error = OUTCOMES[task.status.state]
@@ -407,6 +445,10 @@ class RemoteAgentNode:
         self.log(record(context_id=task.context_id, task_id=task.id,
                         state=TaskState.Name(task.status.state)))
         return task
+
+    async def read(self, task_id: str) -> Task:
+        """Read a recorded task, as a sweep or a resume gate does: one logged get."""
+        return await self._get(task_id)
 
     async def _get(self, task_id: str) -> Task:
         record = self._record("get", ())

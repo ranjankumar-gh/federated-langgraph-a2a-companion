@@ -14,6 +14,12 @@ same person and covers the same claim; otherwise the gate raises PartnerNeedsAut
 RemoteAgentNode.__call__ is unchanged: the gate is a subclass that checks, then calls it.
 Since Chapter 8 the gate's parent is FilteredNode, which adds the ingress filter's
 egress check before a send and the provenance tag after an answer.
+
+Since Chapter 10 the gate reads the recorded task first and asks the cross-owner resume
+state machine (seamkit.resume) for the step. A changed question is recorded and asked
+again; a card whose terms for the skill changed holds the claim for an adjuster; a wait
+past the seam's horizon cancels the task. Revocation and renewal stay Chapter 7's
+`recheck`, unchanged.
 """
 
 import logging
@@ -29,9 +35,18 @@ from a2a.utils.errors import A2AError
 
 from meridian.identity import CLAIMS_ISSUER, MeridianIssuer
 from seamkit.delegation import run_values
-from seamkit.errors import DelegationRefused, DelegationRevoked, PartnerNeedsAuth
-from seamkit.ledger import TERMINAL
-from seamkit.remote import FilteredNode
+import seamkit.ledger
+from seamkit.cards import card_digest
+from seamkit.errors import (
+    ContractBreach,
+    DelegationRefused,
+    DelegationRevoked,
+    PartnerNeedsAuth,
+    WaitExpired,
+)
+from seamkit.ledger import TERMINAL, LedgerEntry, observe, state_name
+from seamkit.remote import FilteredNode, terms_digest
+from seamkit.resume import Held, resume_step
 
 logger = logging.getLogger("meridian.resume")
 
@@ -43,11 +58,46 @@ class ResumeGate(FilteredNode):
     issuer: MeridianIssuer = field(default_factory=lambda: CLAIMS_ISSUER)
 
     async def __call__(self, state: Mapping[str, Any]) -> dict[str, Any]:
-        entry = state.get("ledger", {}).get(self.seam.name)
+        name = self.seam.name
+        entry = state.get("ledger", {}).get(name)
         if entry and entry["task_id"] and entry["state"] not in TERMINAL:
-            await self.recheck(entry["task_id"], entry["authority"], entry["state"],
-                               str(state.get("claim_id", "")))
+            if self.issuer.revoked_id(entry["authority"]):  # before anything is read
+                await self.recheck(entry["task_id"], entry["authority"],
+                                   entry["state"], str(state.get("claim_id", "")))
+            task = await self.read(entry["task_id"])  # the task, never the belief
+            step = resume_step(entry, task, self.held(entry), seamkit.ledger.CLOCK())
+            if step == "reask":  # record the new question; the next entry asks it
+                return {"ledger": {name: observe(entry, task, self.partner.release)}}
+            if step == "hold":
+                raise ContractBreach(name, "the card changed under a waiting task",
+                                     task.id)
+            if step == "expire":
+                await self._withdraw(task.id)
+                raise WaitExpired(name, f"waited on {entry.get('waiting_on')} past "
+                                  f"{self.seam.wait_seconds:g} s", task.id)
+            if step in ("cancel", "renew"):  # Chapter 7's act point, unchanged
+                await self.recheck(task.id, entry["authority"],
+                                   state_name(task.status.state),
+                                   str(state.get("claim_id", "")))
         return await super().__call__(state)
+
+    def held(self, entry: LedgerEntry) -> Held:
+        """What Claims holds now, for the resume state machine to compare against."""
+        return Held(card_digest(self.partner.card),
+                    terms_digest(self.partner, self.seam.skill),
+                    self.issuer.revoked_id(entry["authority"]), self.seam.roles,
+                    self.seam.asks_caller, self.seam.wait_seconds)
+
+    async def _withdraw(self, task_id: str) -> None:
+        """Cancel a task Claims stopped waiting for, under the run's own chain."""
+        try:
+            await self.partner.client.cancel_task(
+                CancelTaskRequest(id=task_id),
+                context=ClientCallContext(timeout=self.seam.timeout))
+            outcome = "canceled"
+        except (A2AClientError, A2AError) as exc:
+            outcome = type(exc).__name__
+        self.log(self._record("cancel", ())(task_id=task_id, state=outcome))
 
     async def recheck(self, task_id: str, chain: str, state: str, claim: str) -> None:
         """Before the node reads or resumes a task: does its authority still hold?"""

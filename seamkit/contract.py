@@ -62,6 +62,9 @@ class SkillTerms:
     p95_seconds: float | None = None  # 95 of 100 tasks answer inside this
     cost_per_task: float | None = None  # declared here, enforced from Chapter 18
     compensated_by: str = ""  # the skill that undoes this one, from Chapter 13
+    # Chapter 10: the longest a task may wait on the partner's own people before the
+    # partner reassigns or fails it; None states no wait horizon
+    wait_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,10 @@ class Expectations:
     skew_seconds: int = 0
     slo_seconds: float = 10.0
     revocation_seconds: int | None = None  # the most we accept; None asks for nothing
+    # Chapter 10: the Claims roles a question on this seam may be put to, and the
+    # longest Claims waits on a partner's people; () keeps Chapter 3's rule
+    roles: tuple[str, ...] = ()
+    wait_seconds: int | None = None
     # Chapter 8: artifact key -> how a read is closed (pattern, choices, items) or
     # capped (max_chars); seamkit.ingress turns these into the seam's ingress rules.
     ingress: Mapping[str, Mapping[str, Any]] = dc_field(default_factory=dict)
@@ -147,6 +154,7 @@ def check(terms: SeamTerms, expects: Expectations,
     found += [f"may ask for {q}, which this seam neither answers nor refuses"  # 5.
               for q in skill.asks if q not in (*expects.answers, *expects.refuses)]
     found += _auth(terms, expects) + _slo(skill, expects)  # 6. and 7.
+    found += _wait(skill, expects)  # 8. Chapter 10
     return [_breach(terms, expects, d) for d in found]
 
 
@@ -187,6 +195,18 @@ def _slo(skill: SkillTerms, expects: Expectations) -> list[str]:
     if skill.p95_seconds > expects.slo_seconds:
         return [f"promises {skill.p95_seconds:g} s at p95, "
                 f"longer than the {expects.slo_seconds:g} s this seam waits"]
+    return []
+
+
+def _wait(skill: SkillTerms, expects: Expectations) -> list[str]:
+    """A skill that may pause for a person states how long; never longer than ours."""
+    if not skill.asks or expects.wait_seconds is None:
+        return []
+    if skill.wait_seconds is None:
+        return ["states no wait horizon"]
+    if skill.wait_seconds > expects.wait_seconds:
+        return [f"may wait {skill.wait_seconds} s on its own people, longer than "
+                f"the {expects.wait_seconds} s this seam waits"]
     return []
 
 
@@ -266,7 +286,8 @@ def _skill(raw: Mapping[str, Any]) -> SkillTerms:
         tuple(str(q) for q in raw.get("asks", [])),
         float(p95) if p95 is not None else None,
         float(cost) if cost is not None else None,
-        str(raw.get("compensated_by", "")))
+        str(raw.get("compensated_by", "")),
+        int(raw["wait_seconds"]) if raw.get("wait_seconds") is not None else None)
 
 
 def _terms(raw: Mapping[str, Any]) -> SeamTerms:
@@ -298,7 +319,9 @@ def load_expectations(path: Path) -> Expectations:
         revocation_seconds=(int(raw["revocation_seconds"])
                             if "revocation_seconds" in raw else None),
         ingress={key: {k: v for k, v in spec.items() if k in INGRESS_KEYS}
-                 for key, spec in reads.items()})
+                 for key, spec in reads.items()},
+        roles=tuple(raw.get("roles", [])),
+        wait_seconds=int(raw["wait_seconds"]) if "wait_seconds" in raw else None)
 
 
 # The keys of a [reads.*] table the ingress filter reads (Chapter 8); the shape check
@@ -315,7 +338,8 @@ def seam_spec(expects: Expectations) -> "SeamSpec":
     return SeamSpec(expects.seam, expects.owner, expects.skill, expects.sends,
                     receives=dict(expects.into), asks_caller=bool(expects.answers),
                     timeout=expects.slo_seconds, shapes=dict(expects.reads),
-                    rules=rules_of(expects))
+                    rules=rules_of(expects), roles=expects.roles,
+                    wait_seconds=expects.wait_seconds)
 
 
 def args_model(skill_id: str, skill: SkillTerms) -> type[BaseModel]:

@@ -75,8 +75,10 @@ GRANTS: dict[str, Grant] = {
         frozenset(SEAMS["fraud_screening"].sends) | {"police_report"}, hops=1),
     "repair_estimate": Grant(frozenset({"estimate_repair"}),
                              frozenset(SEAMS["repair_estimate"].sends), hops=0),
+    # Chapter 10: an answer to Finance's approval question rides this link too.
     "payments": Grant(frozenset({"pay_claim"}),
-                      frozenset(SEAMS["payments"].sends), hops=0),
+                      frozenset(SEAMS["payments"].sends) | {"approved", "approval"},
+                      hops=0),
 }
 
 
