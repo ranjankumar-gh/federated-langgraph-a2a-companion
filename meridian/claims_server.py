@@ -4,6 +4,10 @@ The same GraphExecutor that serves Risk serves the Claims graph. A caller's cont
 becomes a Claims thread_id; a Claims interrupt (Risk's police-report question, passed up
 by RemoteAgentNode) becomes input-required to that caller; the decision is the artifact.
 
+Claims is where every Meridian chain starts. Its caller, the adjuster's portal, presents
+her session as a bearer token; the executor hands it to the run, and the first partner
+call exchanges it at Meridian's issuer for the chain's root.
+
 The lifespan opens the partner connections when the app starts and closes their HTTP
 clients when it stops, so a cold start fetches every partner card once, not per claim.
 """
@@ -13,6 +17,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from a2a.server.context import ServerCallContext
 from a2a.types import AgentCard
 from langgraph.checkpoint.memory import InMemorySaver
 from starlette.applications import Starlette
@@ -37,10 +42,16 @@ class ClaimsAgent:
     app: Starlette
 
 
+def session_of(call: ServerCallContext) -> dict[str, Any]:
+    """The adjuster's session, from the portal's bearer token, for the run's config."""
+    headers: dict[str, str] = call.state.get("headers", {})
+    return {"session": headers.get("authorization", "").removeprefix("Bearer ")}
+
+
 def claims_agent(connections: Mapping[str, PartnerConnection]) -> ClaimsAgent:
     graph = build_a2a_graph(connections, InMemorySaver())
     executor = GraphExecutor(graph, "claim_decision", to_input=dict,
-                             to_artifact=claim_artifact)
+                             to_artifact=claim_artifact, configure=session_of)
     card = agent_card("Meridian claims intake", CLAIMS_URL, "2026.10",
                       {"settle_claim": "Screen, estimate, and pay or refer one claim"})
     return ClaimsAgent(card, executor, a2a_app(card, executor))

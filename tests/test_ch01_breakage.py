@@ -8,7 +8,6 @@ fix.
 import json
 
 import pytest
-from langchain_core.runnables import RunnableConfig
 
 from meridian.federated import A2APartners, build_a2a_graph, connect_partners
 from meridian.federated_naive import (
@@ -23,14 +22,11 @@ from meridian.inprocess import (
     build_graph,
     build_inprocess_graph,
 )
+from meridian.identity import ADJUSTER
 from meridian.risk_server import RISK_URL
 from meridian.samples import clean_claim, suspect_claim
 from seamkit.errors import PartnerUnavailable
-from tests.wire import Outage
-
-
-def thread(tid: str) -> RunnableConfig:
-    return {"configurable": {"thread_id": tid}}
+from tests.wire import Federation, Outage, thread
 
 
 def test_contract_a_rescaled_score_passes_silently() -> None:
@@ -45,11 +41,22 @@ def test_contract_a_rescaled_score_passes_silently() -> None:
     assert federated["decision"] == "paid"  # and no error anywhere
 
 
-def test_authority_every_partner_receives_the_claims_credential() -> None:
+# Rewritten in Chapter 6: each partner now receives a chain that names the adjuster.
+@pytest.mark.anyio
+async def test_authority_a_partner_receives_a_chain_not_our_credential() -> None:
     partners = Partners()
     build_federated_graph(partners).invoke(clean_claim(), thread("a1"))
     for partner in (partners.risk, partners.northgate, partners.finance):
         assert partner.received[-1]["credential"] == CLAIMS_CREDENTIAL
+
+    fed = Federation()
+    await (await fed.graph()).ainvoke(clean_claim(), thread("a2"))
+    risk = fed.partners.risk.executor.received[-1]
+    northgate = fed.partners.northgate.executor.received[-1]
+    assert risk["credential"] == "" and risk["subject"] == ADJUSTER
+    assert northgate["subject"] == ADJUSTER and northgate["path"] == (
+        "meridian-idp", "claims")
+    assert risk["chain"] == northgate["chain"]  # one chain id at every hop
 
 
 def test_state_the_partners_work_lives_in_a_checkpoint_we_cannot_read() -> None:

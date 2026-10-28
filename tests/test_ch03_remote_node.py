@@ -36,9 +36,10 @@ async def test_each_seam_sends_only_the_fields_it_names() -> None:
     await (await fed.graph()).ainvoke(clean_claim(), thread("t2"))
     sent = fed.partners.northgate.executor.received[-1]["request"]
     assert sorted(sent) == ["claim_id", "damaged_parts"]  # no fraud_score this time
-    credential = fed.partners.risk.executor.received[-1]["credential"]
-    assert credential == "Bearer claims-workload-risk"
-    assert CLAIMS_CREDENTIAL not in credential
+    # Since Chapter 6 no credential of Claims' crosses at all: a chain does.
+    received = fed.partners.risk.executor.received[-1]
+    assert received["credential"] == "" and received["chain"].startswith("chain:")
+    assert CLAIMS_CREDENTIAL not in str(received)
 
 
 async def test_the_partner_mints_the_context_and_we_record_it() -> None:

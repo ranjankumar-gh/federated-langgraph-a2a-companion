@@ -10,11 +10,13 @@ from typing import Any, TypedDict
 from a2a.types import AgentCard
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from starlette.applications import Starlette
+from starlette.types import ASGIApp
 
 from meridian.agents import pay
+from meridian.identity import MERIDIAN_TRUSTS
 from seamkit.cards import card_digest
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
+from seamkit.delegation import Guard
 from seamkit.server import GraphExecutor, a2a_app, agent_card
 
 FINANCE_URL = "http://finance.meridian.test/"
@@ -65,4 +67,6 @@ class FinancePartner:
             to_input=lambda claim: {"claim": claim},
             to_artifact=lambda out: {"payment_ref": out["payment_ref"]})
         self.card = finance_card(self.release)
-        self.app: Starlette = a2a_app(self.card, self.executor)
+        inner = a2a_app(self.card, self.executor)
+        self.guard = Guard(inner, "finance", MERIDIAN_TRUSTS)
+        self.app: ASGIApp = self.guard

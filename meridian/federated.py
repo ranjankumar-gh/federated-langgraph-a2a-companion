@@ -8,7 +8,12 @@ Since Chapter 4, SEAMS is derived from the expectations files in meridian/expect
 and connecting to a partner checks its published terms against them.
 
 Since Chapter 5, every partner's card is decided by Meridian's card trust policy
-(meridian/trust.py) before its contract is checked.
+(meridian/trust.py) before its contract is checked, and the decision is what the
+delegation hook asks before authority goes to that card.
+
+Every partner connection carries a DelegationAuth: each call mints a link under the
+run's chain, scoped by the seam's grant, and sends the chain. The chain's root comes
+from Meridian's issuer, exchanged from the adjuster's session the run carries.
 """
 
 from collections.abc import Callable, Mapping
@@ -22,11 +27,13 @@ from starlette.types import ASGIApp
 
 from meridian.data_classes import MERIDIAN_POLICY
 from meridian.finance_server import FINANCE_URL, FinancePartner
+from meridian.identity import CLAIMS_ISSUER, KEYS, MeridianIssuer
 from meridian.inprocess import ClaimGraph, build_graph
 from meridian.risk_server import RISK_URL, RiskPartner
 from meridian.trust import MERIDIAN_TRUST
 from northgate.server import NORTHGATE_URL, NorthgatePartner
 from seamkit.contract import Expectations, load_expectations, seam_spec
+from seamkit.delegation import DelegationAuth, Grant, as_peer, chain_id
 from seamkit.inventory import SeamInventory
 from seamkit.trust import PartnerTrust
 from seamkit.remote import (
@@ -51,10 +58,18 @@ SEAMS: dict[str, SeamSpec] = {name: seam_spec(e) for name, e in EXPECTATIONS.ite
 # The owner map the seam inventory reads, derived from the seams rather than retyped.
 OWNERS_A2A = {"claims_intake": "Claims", **{s.name: s.owner for s in SEAMS.values()}}
 
-# A per-partner workload token: it says the caller is the Claims service and authorises
-# nothing on anyone's behalf. Chapter 6 replaces it with a delegation.
-WORKLOAD_TOKENS = {"Risk": "claims-workload-risk", "Northgate": "claims-workload-ng",
-                   "Finance": "claims-workload-fin"}
+# What each seam's link grants: the seam's own skill and the fields it sends, plus what
+# the partner may pass on, and how many hops below it. Risk may ask Northgate for the
+# estimate history of the claim it is screening, once; nobody else may delegate.
+GRANTS: dict[str, Grant] = {
+    "fraud_screening": Grant(
+        frozenset({"screen_fraud", "estimate_history"}),
+        frozenset(SEAMS["fraud_screening"].sends) | {"police_report"}, hops=1),
+    "repair_estimate": Grant(frozenset({"estimate_repair"}),
+                             frozenset(SEAMS["repair_estimate"].sends), hops=0),
+    "payments": Grant(frozenset({"pay_claim"}),
+                      frozenset(SEAMS["payments"].sends), hops=0),
+}
 
 
 @dataclass
@@ -65,35 +80,48 @@ class A2APartners:
     northgate: NorthgatePartner = field(default_factory=NorthgatePartner)
     finance: FinancePartner = field(default_factory=FinancePartner)
 
+    def __post_init__(self) -> None:
+        self.risk.peers["northgate"] = (NORTHGATE_URL, self.northgate.app)
+
     def apps(self) -> dict[str, tuple[str, ASGIApp]]:
         return {"fraud_screening": (RISK_URL, self.risk.app),
                 "repair_estimate": (NORTHGATE_URL, self.northgate.app),
                 "payments": (FINANCE_URL, self.finance.app)}
 
 
-def in_process_http(url: str, app: ASGIApp, token: str) -> httpx.AsyncClient:
-    """The real SDK client over an ASGI transport: the full wire, no sockets."""
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=url,
-                             headers={"Authorization": f"Bearer {token}"})
+def in_process_http(url: str, app: ASGIApp, workload: str) -> httpx.AsyncClient:
+    """The real SDK client over an ASGI transport: the full wire, no sockets.
+
+    `workload` is the identity an mTLS terminator would pass the partner's server.
+    """
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=as_peer(app, workload)),
+                             base_url=url)
 
 
 async def connect_partners(
         apps: Mapping[str, tuple[str, ASGIApp]],
         http: Mapping[str, httpx.AsyncClient] | None = None,
+        issuer: MeridianIssuer = CLAIMS_ISSUER,
         trust: Mapping[str, PartnerTrust] = MERIDIAN_TRUST,
 ) -> dict[str, PartnerConnection]:
-    """Fetch each card, decide whether to trust it, check its terms, and build a client.
+    """Fetch each card, decide whether to trust it, check its terms, and send a chain.
 
     `http` overrides a transport. A seam whose card is untrusted, or whose terms are
     breached, still connects; its node refuses to send. The policy is looked up by the
-    owner Claims' expectations name, never by anything the card says.
+    owner Claims' expectations name, never by anything the card says. Claims never
+    sends a credential of its own: each call mints a link for that seam under the root
+    the issuer exchanged for this run, and only to a card the policy trusts.
     """
     out: dict[str, PartnerConnection] = {}
     for seam, (url, app) in apps.items():
+        client = (http or {}).get(seam) or in_process_http(url, app, "claims")
         owner = EXPECTATIONS[seam].owner
-        client = (http or {}).get(seam) or in_process_http(url, app, WORKLOAD_TOKENS[owner])
-        out[seam] = await connect(url, client, EXPECTATIONS[seam], MERIDIAN_POLICY,
-                                  trust=trust[owner])
+        out[seam] = conn = await connect(url, client, EXPECTATIONS[seam],
+                                         MERIDIAN_POLICY, trust=trust[owner])
+        assert conn.trust is not None
+        client.auth = DelegationAuth("claims", KEYS["claims"], owner.lower(),
+                                     GRANTS[seam], issuer.run_chain, conn.card,
+                                     conn.trust.covers)
     return out
 
 
@@ -113,6 +141,20 @@ def with_trust(inventory: SeamInventory,
     return inventory
 
 
+def with_authority(inventory: SeamInventory,
+                   grants: Mapping[str, Grant] = GRANTS) -> SeamInventory:
+    """Fill each seam's authority answer from its grant, never by hand."""
+    for entry in inventory.entries:
+        grant = grants.get(entry.callee)
+        if grant is not None:
+            onward = sorted(grant.skills - {SEAMS[entry.callee].skill})
+            entry.answers["authority"] = (
+                f"chain for {SEAMS[entry.callee].skill}"
+                + (f", may pass on {', '.join(onward)}" if onward else "")
+                + f"; {grant.hops} hop(s) below")
+    return inventory
+
+
 def with_contract(inventory: SeamInventory,
                   connections: Mapping[str, PartnerConnection]) -> SeamInventory:
     """Fill each seam's contract answer from the check run at connect, never by hand."""
@@ -129,10 +171,15 @@ def with_contract(inventory: SeamInventory,
     return inventory
 
 
+def run_chain_id(issuer: MeridianIssuer = CLAIMS_ISSUER) -> str:
+    """What a task's thread link records as its authority: the run's chain, by id."""
+    return chain_id(issuer.run_chain())
+
+
 def a2a_workers(connections: Mapping[str, PartnerConnection],
                 log: Callable[[CrossingRecord], None] = log_crossing,
                 ) -> dict[str, RemoteAgentNode]:
-    return {seam: RemoteAgentNode(SEAMS[seam], connections[seam], log)
+    return {seam: RemoteAgentNode(SEAMS[seam], connections[seam], log, run_chain_id)
             for seam in SEAMS}
 
 
@@ -143,7 +190,8 @@ def build_a2a_graph(connections: Mapping[str, PartnerConnection],
     return build_graph(a2a_workers(connections, log), checkpointer)
 
 
-__all__ = ["EXPECTATIONS", "with_contract", "with_trust", "OWNERS_A2A", "SEAMS",
-           "A2APartners",
+__all__ = ["EXPECTATIONS", "GRANTS", "with_authority", "with_contract", "with_trust",
+           "OWNERS_A2A",
+           "SEAMS", "A2APartners",
            "CrossingRecord", "build_a2a_graph",
            "connect_partners", "in_process_http"]

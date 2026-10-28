@@ -6,7 +6,10 @@ from a2a.types import TaskState
 
 from meridian.claims_server import CLAIMS_URL, claims_agent, claims_app
 from meridian.federated import SEAMS, A2APartners, connect_partners, in_process_http
+from meridian.identity import ADJUSTER_SESSION
+from meridian.incident import connect_with_tokens
 from meridian.samples import clean_claim, suspect_claim
+from northgate.server import NorthgatePartner
 from seamkit.errors import PartnerNeedsInput
 from seamkit.remote import CrossingRecord, RemoteAgentNode, SeamSpec, connect
 from seamkit.tools import remote_skill_tool
@@ -17,7 +20,9 @@ pytestmark = pytest.mark.anyio
 async def claims_node(partners: A2APartners) -> RemoteAgentNode:
     """A caller of Claims: Claims is now the partner on the other side of a seam."""
     agent = claims_agent(await connect_partners(partners.apps()))
-    claims = await connect(CLAIMS_URL, in_process_http(CLAIMS_URL, agent.app, "caller"))
+    http = in_process_http(CLAIMS_URL, agent.app, "adjuster-portal")
+    http.headers["Authorization"] = f"Bearer {ADJUSTER_SESSION}"  # her session
+    claims = await connect(CLAIMS_URL, http)
     seam = SeamSpec("settle_claim", "Claims", "settle_claim",
                     sends=tuple(suspect_claim()), receives={"decision": "decision"},
                     asks_caller=False)
@@ -51,15 +56,18 @@ async def test_the_lifespan_connects_partners_once_and_serves_claims() -> None:
 
 
 async def test_a_remote_skill_tool_is_built_from_the_card_as_fetched() -> None:
-    partners = A2APartners()
-    conns = await connect_partners(partners.apps())
+    # Built over Chapter 3's tokened connection to a Northgate that predates chains:
+    # the point here is the card, not the authority.
+    partners = A2APartners(northgate=NorthgatePartner(verifies_chains=False))
+    conns = await connect_with_tokens(partners.apps())
     records: list[CrossingRecord] = []
     # Since Chapter 4 the argument schema comes from Northgate's published terms.
     tool = remote_skill_tool(conns["repair_estimate"], "estimate_history", "Northgate",
                              log=records.append)
     assert tool.name == "estimate_history"
     assert tool.description.startswith("Past estimates")
-    out = await tool.ainvoke({"parts": ["frame"]})  # what a model's tool call does
-    assert out["history"]["frame"]["count"] == 3
-    assert records[0].sent == ("parts",)
+    out = await tool.ainvoke({"claim_id": "CLM-1002"})  # what a model's call does
+    assert out["shop"] == "SHOP-7"
+    assert len(out["estimates"]) == 5  # frame and door, by that shop
+    assert records[0].sent == ("claim_id",)
     assert SEAMS["repair_estimate"].skill == "estimate_repair"  # the node seam differs

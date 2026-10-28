@@ -16,6 +16,7 @@ from meridian.federated import (
     build_a2a_graph,
     connect_partners,
     in_process_http,
+    with_authority,
     with_trust,
 )
 from meridian.inprocess import ClaimState
@@ -225,10 +226,12 @@ async def test_one_malformed_answer_suspends_the_skill_under_this_card() -> None
 async def test_the_inventory_authority_column_starts_with_the_card_decision() -> None:
     federation = Federation(A2APartners(northgate=NorthgatePartner(books=True)))
     graph = await federation.graph()
-    inventory = with_trust(inventory_from_graph(graph, OWNERS_A2A), federation.connections)
+    inventory = with_trust(with_authority(inventory_from_graph(graph, OWNERS_A2A)),
+                           federation.connections)
     answers = {e.callee: e.answers["authority"] for e in inventory.entries}
-    assert answers["repair_estimate"] == "card trusted by key (unapproved: book_repair)"
-    assert answers["fraud_screening"] == "card trusted by digest"
+    assert answers["repair_estimate"].startswith(
+        "card trusted by key (unapproved: book_repair); chain for estimate_repair")
+    assert answers["fraud_screening"].startswith("card trusted by digest; ")
 
 
 async def test_authority_goes_only_to_the_card_the_policy_decided_on() -> None:

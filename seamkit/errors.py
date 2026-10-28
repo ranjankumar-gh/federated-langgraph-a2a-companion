@@ -61,3 +61,13 @@ class CardUntrusted(SeamError):
     by the seam's node before anything is sent, except for the ceiling, which is read
     off the answer. Only this seam stops.
     """
+
+
+class DelegationRefused(SeamError):
+    """A delegation chain was missing, could not be minted, or failed verification.
+
+    Raised on the caller's side when a link cannot be minted (the run has no chain, the
+    partner's card fails the trust hook, or the link would be wider than its parent),
+    and inside a partner's guard when an inbound chain fails a check. The guard answers
+    the caller with an authorization error, which the caller sees as PartnerRejected.
+    """

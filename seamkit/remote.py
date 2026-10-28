@@ -44,6 +44,7 @@ from seamkit.contract import (
 from seamkit.errors import (
     CardUntrusted,
     ContractBreach,
+    DelegationRefused,
     MalformedAnswer,
     PartnerFailed,
     PartnerNeedsAuth,
@@ -219,6 +220,18 @@ def log_crossing(record: CrossingRecord) -> None:
     crossing_logger.info("seam crossing", extra={"crossing": asdict(record)})
 
 
+def refused(exc: A2AClientError) -> str:
+    """The partner guard's reason if this is its 403 refusal; "" for an outage."""
+    cause = exc.__cause__
+    if not (isinstance(cause, httpx.HTTPStatusError)
+            and cause.response.status_code == 403):
+        return ""
+    try:
+        return str(cause.response.json()["error"]["message"])
+    except (ValueError, KeyError, TypeError):
+        return "refused"
+
+
 def question_of(task: Task) -> dict[str, Any]:
     """The partner's question, as the data part of its input-required status message."""
     parts = get_data_parts(task.status.message.parts)
@@ -232,6 +245,8 @@ class RemoteAgentNode:
     seam: SeamSpec
     partner: PartnerConnection
     log: Callable[[CrossingRecord], None] = field(default=log_crossing)
+    # Names the authority a task is sent under, never its value: the run's chain id.
+    authority: Callable[[], str] = field(default=lambda: "")
 
     async def __call__(self, state: Mapping[str, Any]) -> dict[str, Any]:
         links = dict(state.get("thread_links", {}))
@@ -244,14 +259,20 @@ class RemoteAgentNode:
                 reply = interrupt(question_of(task))  # Claims' own human answers
                 task = await self._send(reply, link)  # same task, same context
         links[self.seam.name] = {"context_id": task.context_id, "task_id": task.id}
+        if authority := self.authority():  # the run's chain id, beside its task (Ch 6)
+            links[self.seam.name]["authority"] = authority
         if self._waits_for_us(task):
             return {"thread_links": links}  # checkpoint the link before interrupt()
         return {**self._outcome(task), "thread_links": links,
                 "completed": [self.seam.name]}
 
     async def call_once(self, data: Mapping[str, Any]) -> dict[str, Any]:
-        """One task and no thread link: the tool call shape (seamkit.tools)."""
-        return self._outcome(await self._send(data))
+        """One task and no thread link: the tool call shape (seamkit.tools).
+
+        An argument the model left unset does not cross: only what it chose is sent.
+        """
+        chosen = {k: v for k, v in data.items() if v is not None}
+        return self._outcome(await self._send(chosen))
 
     def _waits_for_us(self, task: Task) -> bool:
         return self.seam.asks_caller and task.status.state == INPUT_REQUIRED
@@ -305,8 +326,13 @@ class RemoteAgentNode:
                     context=ClientCallContext(timeout=self.seam.timeout)):
                 if event.HasField("task"):
                     task = event.task
+        except DelegationRefused as exc:  # refused on our side: nothing was sent
+            self.log(record(error=type(exc).__name__))
+            raise
         except A2AClientError as exc:
             self.log(record(error=type(exc).__name__))
+            if why := refused(exc):
+                raise PartnerRejected(self.seam.name, why) from exc
             raise PartnerUnavailable(self.seam.name, str(exc)) from exc
         except A2AError as exc:
             self.log(record(error=type(exc).__name__))
@@ -324,8 +350,13 @@ class RemoteAgentNode:
             task = await self.partner.client.get_task(
                 GetTaskRequest(id=task_id),
                 context=ClientCallContext(timeout=self.seam.timeout))
+        except DelegationRefused as exc:
+            self.log(record(task_id=task_id, error=type(exc).__name__))
+            raise
         except A2AClientError as exc:
             self.log(record(task_id=task_id, error=type(exc).__name__))
+            if why := refused(exc):
+                raise PartnerRejected(self.seam.name, why, task_id) from exc
             raise PartnerUnavailable(self.seam.name, str(exc), task_id) from exc
         except A2AError as exc:
             self.log(record(task_id=task_id, error=type(exc).__name__))

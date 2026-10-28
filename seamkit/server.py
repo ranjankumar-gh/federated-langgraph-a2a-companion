@@ -4,10 +4,17 @@ The executor is where the mapping runs in the other direction. The incoming cont
 becomes the partner's own thread_id, a data part becomes graph input (or a resume value
 when the thread is paused), interrupt() becomes input-required, and the final state
 becomes one artifact. The caller never sees the partner's checkpoint.
+
+A partner that verifies delegation chains puts a Guard (seamkit.delegation) in front of
+this app. The guard leaves the verified chain in the request's auth, and the executor
+hands it to the partner's own run as config, never as state: a chain is a credential,
+and a checkpoint is no place for one.
 """
 
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+
+from a2a.server.context import ServerCallContext
 
 from a2a.helpers import get_data_parts, new_data_part, new_task_from_user_message
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -32,9 +39,21 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Route
 
+from seamkit.delegation import Verified
 from seamkit.errors import SeamError
 
 AnyGraph = CompiledStateGraph[Any, Any, Any, Any]
+
+
+def verified_of(call: ServerCallContext) -> Verified | None:
+    auth = call.state.get("auth")
+    return auth if isinstance(auth, Verified) else None
+
+
+def delegation_config(call: ServerCallContext) -> dict[str, Any]:
+    """The run's authority: the chain the guard verified, for the partner's calls."""
+    verified = verified_of(call)
+    return {"delegation": verified.chain} if verified else {}
 
 
 def agent_card(name: str, url: str, release: str, skills: Mapping[str, str],
@@ -90,9 +109,12 @@ class GraphExecutor(AgentExecutor):
 
     def __init__(self, graph: AnyGraph, name: str,
                  to_input: Callable[[dict[str, Any]], Any],
-                 to_artifact: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
+                 to_artifact: Callable[[dict[str, Any]], dict[str, Any]],
+                 configure: Callable[[ServerCallContext], dict[str, Any]] = (
+                     delegation_config)) -> None:
         self.graph, self.name = graph, name
         self.to_input, self.to_artifact = to_input, to_artifact
+        self.configure = configure
         # The partner's own log of what it was asked: one entry per execution.
         self.received: list[dict[str, Any]] = []
 
@@ -102,14 +124,19 @@ class GraphExecutor(AgentExecutor):
             await queue.enqueue_event(new_task_from_user_message(context.message))
         updater = TaskUpdater(queue, context.task_id, context.context_id)
         # The caller's contextId is our thread_id. We minted it; the caller records it.
-        config: RunnableConfig = {"configurable": {"thread_id": context.context_id}}
+        call = context.call_context
+        config: RunnableConfig = {"configurable": {"thread_id": context.context_id,
+                                                   **self.configure(call)}}
         data = get_data_parts(context.message.parts)[0]
         paused = (await self.graph.aget_state(config)).interrupts
         run = Command(resume=data) if paused else self.to_input(data)
-        headers = context.call_context.state.get("headers", {})
+        headers = call.state.get("headers", {})
+        verified = verified_of(call)
         self.received.append({"context_id": context.context_id, "data": data,
                               "task_id": context.task_id, "resumed": bool(paused),
-                              "credential": headers.get("authorization", "")})
+                              "credential": headers.get("authorization", ""),
+                              "chain": verified.chain_id if verified else "",
+                              "subject": verified.subject if verified else ""})
         try:
             out = await self.graph.ainvoke(run, config)
         except SeamError as exc:  # our own partner failed us: say so, typed

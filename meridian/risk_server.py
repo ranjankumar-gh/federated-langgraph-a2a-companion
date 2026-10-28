@@ -5,24 +5,40 @@ asks for a police report reference on claims over 10,000 by calling interrupt(),
 executor turns that pause into an input-required task. The caller never reads Risk's
 checkpoint; it sees a task, a question, and in the end one artifact.
 
+Risk's fraud assistant, when deployed, may call Northgate's estimate_history as a remote
+skill tool: the peer seam. `assistant` stands in for the model's tool choices. Since
+Chapter 6, Risk's tool client can only mint a link under the chain Risk verified on the
+screening request; `forwards=True` deploys the incident's client instead, which sends
+on the Authorization header the screening request arrived with.
+
 Risk publishes its seam terms on its card (Chapter 4): the score is on 0-100.
 `rescaled=True` deploys release 2026.10's change, a score on 0-1, whatever the card says.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, TypedDict
 
+import httpx
+from a2a.server.context import ServerCallContext
 from a2a.types import AgentCard
+from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
-from starlette.applications import Starlette
+from starlette.types import ASGIApp
 
 from meridian.agents import screen_fraud
+from meridian.identity import KEYS, MERIDIAN_TRUSTS
+from meridian.incident import ForwardingAuth
 from seamkit.cards import card_digest
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
-from seamkit.server import GraphExecutor, a2a_app, agent_card
+from seamkit.delegation import DelegationAuth, Grant, Guard, as_peer, inbound_chain
+from seamkit.errors import SeamError
+from seamkit.remote import connect
+from seamkit.server import GraphExecutor, a2a_app, agent_card, delegation_config
+from seamkit.tools import remote_skill_tool
 
 RISK_URL = "http://risk.meridian.test/"
 POLICE_REPORT_OVER = 10_000.0
@@ -61,6 +77,17 @@ class RiskScreenState(TypedDict, total=False):
     police_report: str
     fraud_score: float
     fraud_signals: list[str]
+    history_seen: list[dict[str, Any]]  # what the assistant's tool calls came back with
+
+
+# A model's tool choices, given the claim and what earlier calls returned: the next
+# call's arguments, or None to stop. Tests script it; no model key is needed.
+Assistant = Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any] | None]
+
+
+# Risk's link to Northgate: estimate_history for the claim it is screening, no further.
+NORTHGATE_GRANT = Grant(frozenset({"estimate_history"}), frozenset({"claim_id"}), 0)
+MAX_TOOL_CALLS = 3
 
 
 def require_police_report(state: RiskScreenState) -> RiskScreenState:
@@ -76,11 +103,16 @@ def screen(state: RiskScreenState) -> RiskScreenState:
     return {"fraud_score": score, "fraud_signals": signals}
 
 
-def build_risk_graph(checkpointer: InMemorySaver) -> Any:
+def build_risk_graph(checkpointer: InMemorySaver, consult: Any = None) -> Any:
     graph = StateGraph(RiskScreenState)
     graph.add_node("require_police_report", require_police_report)
     graph.add_node("screen", screen)
-    graph.add_edge(START, "require_police_report")
+    if consult is not None:  # the assistant looks before the police-report question
+        graph.add_node("consult_northgate", consult)
+        graph.add_edge(START, "consult_northgate")
+        graph.add_edge("consult_northgate", "require_police_report")
+    else:
+        graph.add_edge(START, "require_police_report")
     graph.add_edge("require_police_report", "screen")
     graph.add_edge("screen", END)
     return graph.compile(checkpointer=checkpointer)
@@ -88,19 +120,67 @@ def build_risk_graph(checkpointer: InMemorySaver) -> Any:
 
 @dataclass
 class RiskPartner:
-    """Risk's deployment: its graph, its checkpointer, its executor, its app."""
+    """Risk's deployment: its graph, its checkpointer, its executor, its app.
+
+    Passing `assistant` deploys the fraud assistant and its Northgate tool; `peers`
+    holds Northgate's address.
+    """
 
     release: str = "2026.09"
     checkpointer: InMemorySaver = field(default_factory=InMemorySaver)
+    assistant: Assistant | None = None
+    forwards: bool = False  # the incident's tool client
+    peers: dict[str, tuple[str, ASGIApp]] = field(default_factory=dict)
     terms: SeamTerms = RISK_TERMS
     rescaled: bool = False  # release 2026.10: the score leaves Risk on 0-1
 
     def __post_init__(self) -> None:
+        consult = self._consult_northgate if self.assistant else None
         scale = 100.0 if self.rescaled else 1.0
-        self.graph = build_risk_graph(self.checkpointer)
+        self.graph = build_risk_graph(self.checkpointer, consult)
         self.executor = GraphExecutor(
             self.graph, "fraud_screening",
             to_input=lambda claim: {"claim": claim},
-            to_artifact=lambda out: {"fraud_score": out["fraud_score"] / scale})
+            to_artifact=lambda out: {"fraud_score": out["fraud_score"] / scale},
+            configure=self._configure)
         self.card = risk_card(self.release, self.terms)
-        self.app: Starlette = a2a_app(self.card, self.executor)
+        inner = a2a_app(self.card, self.executor)
+        self.guard = Guard(inner, "risk", MERIDIAN_TRUSTS)
+        self.app: ASGIApp = inner if self.forwards else self.guard
+        self._tool: StructuredTool | None = None
+
+    def _configure(self, call: ServerCallContext) -> dict[str, Any]:
+        if self.forwards:  # what the incident's client reads and sends on
+            headers: dict[str, str] = call.state.get("headers", {})
+            return {"authorization": headers.get("authorization", "")}
+        return delegation_config(call)
+
+    async def history_tool(self) -> StructuredTool:
+        """Northgate's estimate_history as a tool, on a client that mints or forwards."""
+        if self._tool is None:
+            url, app = self.peers["northgate"]
+            http = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=as_peer(app, "risk")), base_url=url)
+            from meridian.trust import MERIDIAN_TRUST  # the policy reads Risk's digests
+
+            northgate = await connect(url, http, trust=MERIDIAN_TRUST["Northgate"])
+            assert northgate.trust is not None
+            http.auth = ForwardingAuth() if self.forwards else DelegationAuth(
+                "risk", KEYS["risk"], "northgate", NORTHGATE_GRANT, inbound_chain,
+                northgate.card, northgate.trust.covers)
+            # The argument schema comes from Northgate's published input terms.
+            self._tool = remote_skill_tool(northgate, "estimate_history", "Northgate",
+                                           log=lambda record: None)
+        return self._tool
+
+    async def _consult_northgate(self, state: RiskScreenState) -> RiskScreenState:
+        assert self.assistant is not None
+        tool = await self.history_tool()
+        seen: list[dict[str, Any]] = []
+        while len(seen) < MAX_TOOL_CALLS and (
+                args := self.assistant(state["claim"], seen)) is not None:
+            try:
+                seen.append(await tool.ainvoke(args))
+            except SeamError as exc:  # a tool error goes back to the model, as text
+                seen.append({"error": type(exc).__name__, "detail": exc.detail})
+        return {"history_seen": seen}
