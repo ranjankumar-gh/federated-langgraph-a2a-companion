@@ -114,6 +114,30 @@ Run only this chapter's tests with `uv run pytest tests/test_ch04_contract.py`.
 
 Run only this chapter's tests with `uv run pytest tests/test_ch05_trust.py`.
 
+### Chapter 6: On Whose Authority: Delegation Chains Across Owners
+
+- `seamkit/delegation.py`: the delegation chain. `Link` is one signed link (issuer, subject, claims,
+  audience, skills, fields, hops left, expiry); `narrows` and `mint` add a link no
+  wider than its parent; `DelegationAuth` is the caller's transport, which runs the trust hook,
+  reads the run's chain and mints the next link on every request; `verify` checks a chain
+  whole; `Guard` wraps a partner server, refuses a chain it cannot verify, and binds it to the
+  workload that presents it. `inbound_chain` reads the verified chain inside a partner's run.
+- `meridian/identity.py`: `MeridianIssuer`, Meridian's identity provider, which exchanges an
+  adjuster's session for the root link of a chain.
+- `meridian/federated.py`: `connect_partners` gives each seam a `DelegationAuth`;
+  `in_process_http` presents each request as a named workload; `with_authority` fills the seam
+  inventory's authority column from each seam's grant.
+- `meridian/risk_server.py`, `meridian/finance_server.py`, `northgate/server.py`: every partner
+  server behind a `Guard`; Northgate's `estimate_history` reads the insurer from the verified
+  chain, not from the request.
+- `meridian/incident.py`: `ForwardingAuth` and the per-partner `WORKLOAD_TOKENS`, the
+  chapter's opening incident (a partner forwarding the caller's token), kept deliberately
+  wrong.
+- `tests/test_ch06_delegation.py`: the incident, a chain minted and refused whole, narrowing,
+  workload binding, expiry, per-insurer history, and the inventory's authority column.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch06_delegation.py`.
+
 ### Chapter 7: Revoking Mid-Task
 
 - `seamkit/revocation.py`: the signed revocation list (`RevocationList`, `revoked`), a
