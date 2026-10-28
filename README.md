@@ -183,6 +183,23 @@ Run only this chapter's tests with `uv run pytest tests/test_ch07_revocation.py`
 
 Run only this chapter's tests with `uv run pytest tests/test_ch08_ingress.py`.
 
+### Chapter 9: The Task Is the Only Shared State
+
+- `seamkit/ledger.py`: the caller's task ledger. `LedgerEntry` is one entry per seam;
+  `merge_ledger` is its reducer, which refuses a write from an older read, a final state that
+  slides back, and a second task while one is open (`StaleLedgerWrite` is in
+  `seamkit/errors.py`); `intended`, `observe` and `follow_on` write the entry.
+- `meridian/inprocess.py`: `ClaimState` gains the `ledger` field, replacing `thread_links`.
+- `seamkit/remote.py`: `RemoteAgentNode` rebuilt to record its intent before it sends, send
+  with the idempotency key as the message id, and read the task it already sent on re-entry.
+- `meridian/incident.py`: `LinkOnReturn`, Chapter 3's node with its thread link, kept to
+  reproduce the chapter's opening incident.
+- `tests/test_ch09_ledger.py`: the incident and the ledger through it, the reducer's three
+  refusals, a restart, a partner that forgets, a send with no answer, an outside write, and an
+  amended claim in the same context.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch09_ledger.py`.
+
 ### Chapter 10: Interrupt, Resume, and the Human on the Other Side
 
 - `seamkit/server.py`: `ask(question, owner, role)` puts an addressee on an interrupt;
