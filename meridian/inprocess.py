@@ -6,7 +6,7 @@ call.
 """
 
 import operator
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from typing import Annotated, Any, Protocol, TypedDict
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -23,12 +23,15 @@ class ClaimState(TypedDict, total=False):
     days_to_report: int
     prior_claims: int
     damaged_parts: list[str]
+    policy: dict[str, Any]  # the policy record the cover check read (Chapter 2)
+    covered_parts: list[str]
     fraud_score: float  # 0-100: the scale the Claims threshold was written against
     fraud_signals: list[str]
     repair_estimate: float
     payment_ref: str
     decision: str  # "paid" or "refer"
     completed: Annotated[list[str], operator.add]
+    thread_links: dict[str, dict[str, str]]  # seam -> the partner's context and task
 
 
 CLAIM_FIELDS = frozenset(ClaimState.__annotations__)
@@ -36,15 +39,18 @@ FRAUD_THRESHOLD = 70.0
 
 
 class Node(Protocol):
-    def __call__(self, state: ClaimState) -> ClaimState: ...
+    # A plain function in one deployment; from Chapter 3 also an awaitable remote call.
+    def __call__(
+        self, state: ClaimState) -> ClaimState | Awaitable[Mapping[str, Any]]: ...
 
 
 ClaimGraph = CompiledStateGraph[ClaimState, None, ClaimState, ClaimState]
 
 
 def claims_intake(state: ClaimState) -> ClaimState:
-    # A missing score reads as 0.0. In one deployment it is never missing.
-    if state.get("fraud_score", 0.0) > FRAUD_THRESHOLD:
+    screened = "fraud_screening" in state.get("completed", [])
+    # No default: after screening, a missing score raises instead of reading as 0.0.
+    if screened and state["fraud_score"] > FRAUD_THRESHOLD:
         return {"decision": "refer"}
     if "payment_ref" in state:
         return {"decision": "paid"}

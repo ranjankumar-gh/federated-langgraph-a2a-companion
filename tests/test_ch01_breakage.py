@@ -10,6 +10,7 @@ import json
 import pytest
 from langchain_core.runnables import RunnableConfig
 
+from meridian.federated import A2APartners, build_a2a_graph, connect_partners
 from meridian.federated_naive import (
     CLAIMS_CREDENTIAL,
     Partners,
@@ -22,7 +23,10 @@ from meridian.inprocess import (
     build_graph,
     build_inprocess_graph,
 )
+from meridian.risk_server import RISK_URL
 from meridian.samples import clean_claim, suspect_claim
+from seamkit.errors import PartnerUnavailable
+from tests.wire import Outage
 
 
 def thread(tid: str) -> RunnableConfig:
@@ -59,7 +63,9 @@ def test_state_the_partners_work_lives_in_a_checkpoint_we_cannot_read() -> None:
                                        "repeat_claimant"]
 
 
-def test_failure_a_partner_timeout_arrives_as_a_missing_key() -> None:
+# Rewritten in Chapter 3: the outage no longer arrives as a missing key. It raises.
+@pytest.mark.anyio
+async def test_failure_a_partner_outage_stops_the_run() -> None:
     def risk_down(state: ClaimState) -> ClaimState:
         raise TimeoutError("fraud screening did not answer")
 
@@ -67,11 +73,14 @@ def test_failure_a_partner_timeout_arrives_as_a_missing_key() -> None:
     with pytest.raises(TimeoutError):
         in_process.invoke(suspect_claim(), thread("f1"))
 
-    partners = Partners(risk=RiskRuntime(available=False))
-    federated = build_federated_graph(partners).invoke(
-        suspect_claim(), thread("f2"))
-    assert "fraud_score" not in federated
-    assert federated["decision"] == "paid"
+    partners = A2APartners()
+    risk = Outage(partners.risk.app)  # the card is fetched, then Risk goes down
+    http = {"fraud_screening": risk.http(RISK_URL)}
+    federated = build_a2a_graph(await connect_partners(partners.apps(), http))
+    risk.down = True
+    with pytest.raises(PartnerUnavailable):
+        await federated.ainvoke(suspect_claim(), thread("f2"))
+    assert "decision" not in (await federated.aget_state(thread("f2"))).values
 
 
 def test_accountability_our_record_ends_at_the_call() -> None:
