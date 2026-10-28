@@ -39,6 +39,7 @@ from starlette.types import ASGIApp
 from meridian.agents import screen_fraud
 from meridian.identity import KEYS, MERIDIAN_TRUSTS, revocation_sources
 from meridian.incident import ForwardingAuth
+from seamkit.breaker import BreakerPolicy, SeamBreaker
 from seamkit.cards import card_digest
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
 from seamkit.delegation import DelegationAuth, Grant, Guard, as_peer, inbound_chain
@@ -66,6 +67,14 @@ RISK_TERMS = SeamTerms("2026.09", date(2026, 9, 14), {"screen_fraud": SCREEN_FRA
 RISK_TERMS_0_1 = replace(RISK_TERMS, revision="2026.10", effective=date(2026, 10, 6),
                          skills={"screen_fraud": replace(SCREEN_FRAUD, outputs=(
                              Field("fraud_score", "number", bounds=(0.0, 1.0)),))})
+# Chapter 14: release 2027.02 states how each screening was made. While Risk's own
+# breaker on Northgate's estimate_history is open, Risk screens without the history,
+# and the answer says so in `basis`, never as a silent change in the score.
+BASIS_FULL, BASIS_DEGRADED = "full", "without estimate history"
+RISK_TERMS_2027_02 = replace(
+    RISK_TERMS, revision="2027.02", effective=date(2027, 2, 1),
+    skills={"screen_fraud": replace(SCREEN_FRAUD, outputs=(
+        *SCREEN_FRAUD.outputs, Field("basis", "string")))})
 
 
 def risk_card(release: str, terms: SeamTerms = RISK_TERMS) -> AgentCard:
@@ -79,7 +88,7 @@ def risk_card(release: str, terms: SeamTerms = RISK_TERMS) -> AgentCard:
 # Risk's pipeline publishes each card's digest with the release; Claims pins them.
 RELEASED: tuple[tuple[str, SeamTerms], ...] = (
     ("2026.09", RISK_TERMS), ("2026.10", RISK_TERMS), ("2026.10", RISK_TERMS_0_1),
-    ("2026.11", RISK_TERMS), ("2026.12", RISK_TERMS))
+    ("2026.11", RISK_TERMS), ("2026.12", RISK_TERMS), ("2027.02", RISK_TERMS_2027_02))
 PUBLISHED_DIGESTS = frozenset(card_digest(risk_card(*release)) for release in RELEASED)
 
 
@@ -99,6 +108,13 @@ Assistant = Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any] | No
 # Risk's link to Northgate: estimate_history for the claim it is screening, no further.
 NORTHGATE_GRANT = Grant(frozenset({"estimate_history"}), frozenset({"claim_id"}), 0)
 MAX_TOOL_CALLS = 3
+# Chapter 14: Risk's own breaker on the peer seam. It trips at three late or missing
+# history answers in a minute, sooner than Claims' breaker on Risk (five), so the
+# breaker nearest the cause opens first. While it is open, Risk screens without the
+# history and says so.
+HISTORY_BREAKER = BreakerPolicy(late_seconds=4.0, failures=3, window_seconds=60,
+                                open_seconds=300, trial="estimate_history",
+                                max_in_flight=4, mode="substitute")
 
 # Risk's rules for what estimate_history may put in front of its assistant: all closed.
 HISTORY_RULES: dict[str, IngressRule] = {
@@ -170,25 +186,40 @@ class RiskPartner:
     revocations: Mapping[str, RevocationSource] | None = None
     now: Callable[[], float] = time.time
     filtered: bool = True  # Chapter 8: the history tool's answer passes the filter
+    # Chapter 14: Risk's own breaker on its peer seam, and the transport its history
+    # tool reaches Northgate over (None: the in-process wire, with no latency)
+    breaker: BreakerPolicy | None = None
+    wire: Callable[[ASGIApp], httpx.AsyncBaseTransport] | None = None
 
     def __post_init__(self) -> None:
         sources = (revocation_sources() if self.revocations is None
                    else self.revocations)
         self.check = checker(sources)
         consult = self._consult_northgate if self.assistant else None
-        scale = 100.0 if self.rescaled else 1.0
         self.graph = build_risk_graph(self.checkpointer, self.lookups, consult)
         self.executor = GraphExecutor(
             self.graph, "fraud_screening",
             to_input=lambda claim: {"claim": claim},
-            to_artifact=lambda out: {"fraud_score": out["fraud_score"] / scale},
-            configure=self._configure)
+            to_artifact=self._artifact, configure=self._configure)
+        self.history_breaker: SeamBreaker | None = None
+        if self.breaker is not None:
+            self.history_breaker = SeamBreaker("estimate_history", "Northgate",
+                                               "estimate_history", self.breaker)
         self.card = risk_card(self.release, self.terms)
         inner = a2a_app(self.card, self.executor)
         self.guard = Guard(inner, "risk", MERIDIAN_TRUSTS, now=self.now,
                            revoked=self.check)
         self.app: ASGIApp = inner if self.forwards else self.guard
         self._tool: StructuredTool | None = None
+
+    def _artifact(self, out: dict[str, Any]) -> dict[str, Any]:
+        answer: dict[str, Any] = {
+            "fraud_score": out["fraud_score"] / (100.0 if self.rescaled else 1.0)}
+        outputs = {f.name for f in self.terms.skills["screen_fraud"].outputs}
+        if "basis" in outputs:  # 2027.02: a screening says what it was made from
+            missed = any("error" in seen for seen in out.get("history_seen", []))
+            answer["basis"] = BASIS_DEGRADED if missed else BASIS_FULL
+        return answer
 
     def _configure(self, call: ServerCallContext) -> dict[str, Any]:
         if self.forwards:  # what the incident's client reads and sends on
@@ -200,8 +231,10 @@ class RiskPartner:
         """Northgate's estimate_history as a tool, on a client that mints or forwards."""
         if self._tool is None:
             url, app = self.peers["northgate"]
-            http = httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=as_peer(app, "risk")), base_url=url)
+            peer = as_peer(app, "risk")
+            transport = (self.wire(peer) if self.wire
+                         else httpx.ASGITransport(app=peer))
+            http = httpx.AsyncClient(transport=transport, base_url=url)
             from meridian.trust import MERIDIAN_TRUST  # the policy reads Risk's digests
 
             northgate = await connect(url, http, trust=MERIDIAN_TRUST["Northgate"])
@@ -215,7 +248,8 @@ class RiskPartner:
             self._tool = remote_skill_tool(northgate, "estimate_history", "Northgate",
                                            log=lambda record: None,
                                            rules=HISTORY_RULES,
-                                           filtered=self.filtered)
+                                           filtered=self.filtered,
+                                           breaker=self.history_breaker)
         return self._tool
 
     async def _consult_northgate(self, state: RiskScreenState) -> RiskScreenState:

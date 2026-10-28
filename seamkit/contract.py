@@ -18,6 +18,7 @@ from a2a.types import AgentCard, AgentExtension
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel, create_model
 
+from seamkit.breaker import MODES, BreakerPolicy
 from seamkit.retry import NO_RETRY, RetryPolicy
 
 if TYPE_CHECKING:
@@ -117,6 +118,8 @@ class Expectations:
     # its key up first, on a partner that honours none (a crash between send and record)
     retry: RetryPolicy = NO_RETRY
     lookup: bool = False
+    # Chapter 14: the seam's breaker and its degraded mode; None keeps no breaker
+    breaker: BreakerPolicy | None = None
     # Chapter 8: artifact key -> how a read is closed (pattern, choices, items) or
     # capped (max_chars); seamkit.ingress turns these into the seam's ingress rules.
     ingress: Mapping[str, Mapping[str, Any]] = dc_field(default_factory=dict)
@@ -172,6 +175,7 @@ def check(terms: SeamTerms, expects: Expectations,
     found += _auth(terms, expects) + _slo(skill, expects)  # 6. and 7.
     found += _wait(skill, expects)  # 8. Chapter 10
     found += _retry(skill, terms, expects)  # 9. Chapter 12
+    found += _late(skill, expects)  # Chapter 14
     return [_breach(terms, expects, d) for d in found]
 
 
@@ -236,6 +240,17 @@ def _retry(skill: SkillTerms, terms: SeamTerms, expects: Expectations) -> list[s
         return [f"keeps a key {skill.key_seconds} s, and this seam resends for "
                 f"{policy.deadline_seconds:g} s plus {terms.skew_seconds} s of skew"]
     return []
+
+
+def _late(skill: SkillTerms, expects: Expectations) -> list[str]:
+    """A breaker that counts what the partner promised opens on a healthy partner."""
+    late = expects.breaker.late_seconds if expects.breaker else None
+    if late is None or skill.p95_seconds is None or late >= skill.p95_seconds:
+        return []
+    if skill.p95_seconds > expects.slo_seconds:  # Chapter 4's breach already holds it
+        return []
+    return [f"promises {skill.p95_seconds:g} s at p95, and this seam's breaker "
+            f"counts an answer after {late:g} s against it"]
 
 
 def violations(answer: Mapping[str, Any], shapes: Mapping[str, Field]) -> list[str]:
@@ -356,13 +371,23 @@ def load_expectations(path: Path) -> Expectations:
         delivery=str(raw.get("delivery", "stream")),
         backstop_seconds=(int(raw["backstop_seconds"])
                           if "backstop_seconds" in raw else None),
-        retry=_policy(raw.get("retry", {})), lookup=bool(raw.get("lookup", False)))
+        retry=_policy(raw.get("retry", {})), lookup=bool(raw.get("lookup", False)),
+        breaker=_breaker(raw["breaker"]) if "breaker" in raw else None)
 
 
 def _policy(raw: Mapping[str, Any]) -> RetryPolicy:
     return RetryPolicy(int(raw.get("attempts", 1)), float(raw.get("base", 1.0)),
                        float(raw.get("cap", 60.0)),
                        float(raw.get("deadline_seconds", 0.0)))
+
+
+def _breaker(raw: Mapping[str, Any]) -> BreakerPolicy:
+    mode = str(raw["mode"])
+    if mode not in MODES:
+        raise ValueError(f"breaker mode {mode!r} is not one of {sorted(MODES)}")
+    return BreakerPolicy(float(raw["late_seconds"]), int(raw["failures"]),
+                         float(raw["window_seconds"]), float(raw["open_seconds"]),
+                         str(raw.get("trial", "")), int(raw["max_in_flight"]), mode)
 
 
 # The keys of a [reads.*] table the ingress filter reads (Chapter 8); the shape check

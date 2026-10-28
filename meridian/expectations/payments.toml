@@ -12,6 +12,15 @@ slo_seconds = 10.0
 delivery = "push"  # Finance's approvers take hours or days
 backstop_seconds = 3600  # one read an hour: 72 over the 72-hour wait horizon
 
+[breaker]  # Chapter 14: a payment holds; nobody pays in Finance's place
+late_seconds = 6.0  # Finance promises 3 s at p95
+failures = 3
+window_seconds = 60
+open_seconds = 600
+trial = "pay_claim"
+max_in_flight = 4
+mode = "hold"
+
 [retry]  # resends only under a key Finance's terms honour, and inside its window
 attempts = 3  # the first send and two more, every one under the entry's key
 deadline_seconds = 600  # no resend later than ten minutes after the first send

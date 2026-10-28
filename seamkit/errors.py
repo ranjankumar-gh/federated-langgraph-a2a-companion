@@ -94,6 +94,17 @@ class UntrustedEgress(SeamError):
     """
 
 
+class BreakerOpen(SeamError):
+    """The seam's breaker refuses a send that would open work at the partner.
+
+    Raised by the seam's node before anything is sent and before an intent is recorded:
+    the breaker is open on the partner's recent failures to answer, half-open with its
+    one trial out, full to its in-flight cap, or pinned open by a partner stop. Reads,
+    cancels and compensations are never refused by it. The claim takes the seam's
+    degraded mode.
+    """
+
+
 class WaitExpired(SeamError):
     """A task waited on the partner's own people longer than this seam's wait horizon.
 

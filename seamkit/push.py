@@ -32,6 +32,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from seamkit.breaker import SeamBreaker
 from seamkit.ledger import TERMINAL, LedgerEntry
 from seamkit.remote import RemoteAgentNode
 from seamkit.resume import sweep, wake
@@ -168,8 +169,14 @@ def pushed_task_id(body: bytes) -> str:
 
 def receiver(key: bytes, queue: WakeQueue, limit: RateLimit,
              log: Callable[[PushRecord], None] = log_push,
-             path: str = "/push") -> Starlette:
-    """Claims' push endpoint, POST {path}/{thread}/{seam}: verified, then queued."""
+             path: str = "/push",
+             flood: Mapping[str, SeamBreaker] | None = None) -> Starlette:
+    """Claims' push endpoint, POST {path}/{thread}/{seam}: verified, then queued.
+
+    `flood` puts a breaker per seam behind the rate limit (Chapter 14): a partner that
+    keeps hitting the limit has every push dropped unread while it is open, and the
+    seam's backstop poll finds whatever those pushes were for.
+    """
 
     async def verify(request: Request) -> JSONResponse:
         thread, seam = request.path_params["thread"], request.path_params["seam"]
@@ -179,7 +186,13 @@ def receiver(key: bytes, queue: WakeQueue, limit: RateLimit,
             log(PushRecord(seam, thread, claimed, status, verdict))
             return JSONResponse({"verdict": verdict}, status_code=status)
 
-        if not limit.allow(seam):  # 1. per partner, before any work is done
+        guard = (flood or {}).get(seam)
+        if guard and (why := guard.allow(limit.now())):  # Chapter 14: a flood, held
+            return answer(503, f"breaker {why}")
+        allowed = limit.allow(seam)  # 1. per partner, before any work is done
+        if guard:  # a push over the limit counts against the partner
+            guard.observe(not allowed, limit.now())
+        if not allowed:
             return answer(429, "rate limited")
         entry = await queue.entry(thread, seam)
         token = request.headers.get(TOKEN_HEADER, "")

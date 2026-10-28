@@ -9,6 +9,15 @@ skew_seconds = 30
 revocation_seconds = 120  # the longest a revoked chain may act at Northgate
 slo_seconds = 10.0
 
+[breaker]  # Chapter 14: a booking never trials; it follows the estimate's breaker
+late_seconds = 4.0
+failures = 3
+window_seconds = 60
+open_seconds = 300
+trial = "estimate_repair"
+max_in_flight = 4
+mode = "hold"  # nobody else can book a repair at Northgate's shops
+
 [retry]  # a booking is resent only under a key Northgate's terms honour
 attempts = 3
 deadline_seconds = 600

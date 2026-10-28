@@ -11,6 +11,15 @@ slo_seconds = 10.0
 delivery = "push"  # the assessor desk takes about 21 minutes on frame damage
 backstop_seconds = 300  # a lost push is found within five minutes
 
+[breaker]  # Chapter 14: counts only Northgate's failures to answer
+late_seconds = 6.0  # Northgate promises 4 s at p95; later than 6 s counts
+failures = 3  # counted outcomes inside the window open it
+window_seconds = 60
+open_seconds = 300  # five minutes before one real estimate tests Northgate
+trial = "estimate_repair"  # billed and kept: the plan's cost accepted
+max_in_flight = 4  # no more than four sends wait on Northgate at once
+mode = "substitute"  # a Claims desk assessor estimates, tagged as the desk's
+
 [reads.estimate]
 into = "repair_estimate"
 type = "number"

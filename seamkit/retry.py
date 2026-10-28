@@ -43,10 +43,15 @@ NO_RETRY = RetryPolicy()
 
 def refuse_retry(policy: RetryPolicy, call: str, error: SeamError, attempt: int,
                  key_seconds: int | None, skew_seconds: int, first_sent: float,
-                 now: float) -> str:
-    """Why this call may not be made again now, or "" if it may."""
+                 now: float, held: str = "") -> str:
+    """Why this call may not be made again now, or "" if it may.
+
+    `held` is why the seam's breaker refuses new work now (Chapter 14), or "".
+    """
     if not isinstance(error, PartnerUnavailable):  # 1. an answer: never repeat it
         return f"{type(error).__name__} is an answer"
+    if held:  # Chapter 14: the seam's breaker is open, so nothing is made again
+        return f"the seam's breaker holds: {held}"
     if attempt >= policy.attempts:  # 2. the attempts this seam allows, all spent
         return f"{policy.attempts} attempts made"
     if call != "send":  # 3. a read changes nothing: retry it
@@ -85,7 +90,8 @@ def retry_after(error: BaseException) -> float | None:
 async def retrying(call: Callable[[], Awaitable[T]], kind: str, policy: RetryPolicy,
                    key_seconds: int | None, skew_seconds: int, first_sent: float,
                    clock: Callable[[], float], made: int = 0,
-                   sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> T:
+                   sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                   held: Callable[[], str] = lambda: "") -> T:
     """Make `call` until it answers or the policy refuses; the last error is raised.
 
     `made` counts attempts already made and lost, such as the send an unknown entry
@@ -102,7 +108,7 @@ async def retrying(call: Callable[[], Awaitable[T]], kind: str, policy: RetryPol
         except SeamError as exc:
             attempt, last = attempt + 1, exc
             if refuse_retry(policy, kind, exc, attempt, key_seconds, skew_seconds,
-                            first_sent, clock()):
+                            first_sent, clock(), held()):
                 raise
 
 

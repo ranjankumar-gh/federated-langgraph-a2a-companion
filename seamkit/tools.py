@@ -20,6 +20,7 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 
+from seamkit.breaker import SeamBreaker
 from seamkit.contract import args_model
 from seamkit.delegation import run_value
 from seamkit.errors import CardUntrusted, ContractBreach
@@ -37,9 +38,12 @@ from seamkit.retry import onward_key
 def remote_skill_tool(partner: PartnerConnection, skill_id: str, owner: str,
                       log: Callable[[CrossingRecord], None] = log_crossing,
                       rules: Mapping[str, IngressRule] | None = None,
-                      filtered: bool = True) -> StructuredTool:
+                      filtered: bool = True,
+                      breaker: SeamBreaker | None = None) -> StructuredTool:
     """`rules` are the caller's (Chapter 8); without them every output the partner
-    promises gets the rule its type gives it, so every string is text and withheld."""
+    promises gets the rule its type gives it, so every string is text and withheld.
+    `breaker` is the caller's own on this skill (Chapter 14): while it is open, the
+    tool answers BreakerOpen at once and sends nothing."""
     if why := partner.refuses(skill_id):  # the card trust policy decides, not the card
         raise CardUntrusted(skill_id, why)
     skill = next(s for s in partner.card.skills if s.id == skill_id)  # as fetched
@@ -53,7 +57,7 @@ def remote_skill_tool(partner: PartnerConnection, skill_id: str, owner: str,
     seam = SeamSpec(skill_id, owner, skill_id, tuple(args.model_fields),
                     receives={name: name for name in outputs}, shapes=outputs,
                     rules=held)
-    node = RemoteAgentNode(seam, partner, log)
+    node = RemoteAgentNode(seam, partner, log, breaker=breaker)
 
     async def call(**kwargs: Any) -> dict[str, Any]:
         # Chapter 12: inside a partner's run, the key is derived from the key of the

@@ -35,6 +35,13 @@ three resends under the entry's key, on a Finance that does nothing with a key. 
 partner's half of the key (seamkit.server.KeyedHandler), the seam retry policy
 (seamkit.retry), and the reconciliation job (seamkit.reconcile) are the fix.
 
+Chapter 14's incident is SlowNorthgate below: a Northgate deploy that makes every send
+slow, on the clock the drill's owners share. Clocked is the wire each caller reaches its
+partner over in that test: latency passes on the clock, and an answer that comes later
+than the caller's timeout never arrives, as with a real client's timeout. Each caller's
+breaker, Risk's on its peer seam included, is the fix (seamkit.breaker,
+meridian.containment).
+
 Chapter 13's incident is the saga graph built with no compensator,
 meridian.saga.build_saga_graph(workers, None): a reversed claim is referred and the run
 ends, leaving the booking standing at Northgate. The saga plan and the compensator
@@ -43,6 +50,7 @@ ends, leaving the booking standing at Northgate. The saga plan and the compensat
 
 import json
 from collections.abc import Callable, Generator, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -261,3 +269,35 @@ class ResendOnUnknown(ResumeGate):
             except PartnerUnavailable:
                 await self.sleep(2.0 ** attempt)
         raise PartnerUnavailable(self.seam.name, "sent, outcome unknown")
+
+
+# Chapter 14 ---------------------------------------------------------------------------
+
+@dataclass
+class SlowNorthgate:
+    """The deploy that made Northgate's front door slow: every send waits `seconds`."""
+
+    seconds: float
+
+    def __call__(self, request: httpx.Request) -> float:
+        return self.seconds if b'"SendMessage"' in request.content else 0.0
+
+
+@dataclass
+class Clocked(httpx.AsyncBaseTransport):
+    """A caller's wire on the drill's clock, with the caller's timeout."""
+
+    inner: httpx.AsyncBaseTransport
+    clock: Callable[[], float]
+    advance: Callable[[float], None]
+    timeout: float = 10.0  # the seam's slo_seconds: every Meridian seam waits ten
+    latency: Callable[[httpx.Request], float] = field(default=lambda request: 0.0)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        started = self.clock()
+        self.advance(self.latency(request))  # the partner's own time, on the clock
+        response = await self.inner.handle_async_request(request)
+        if self.clock() - started > self.timeout:  # the caller stopped waiting
+            raise httpx.ReadTimeout("no answer inside the caller's timeout",
+                                    request=request)
+        return response

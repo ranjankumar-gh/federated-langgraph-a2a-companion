@@ -62,7 +62,9 @@ from seamkit.contract import (
     terms_of,
     violations,
 )
+from seamkit.breaker import SeamBreaker
 from seamkit.errors import (
+    BreakerOpen,
     CardUntrusted,
     ContractBreach,
     DelegationRefused,
@@ -336,11 +338,16 @@ class RemoteAgentNode:
         default=no_push)
     # Chapter 12: how a retry waits; a test replaces it with one that moves a clock
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
+    # Chapter 14: the seam's breaker, asked before a send opens work and told after
+    breaker: SeamBreaker | None = None
 
     async def __call__(self, state: Mapping[str, Any]) -> dict[str, Any]:
         name = self.seam.name
         entry = state.get("ledger", {}).get(name)
         if entry is None:  # the intent and its key are checkpointed before any send
+            if self.breaker and (why := self.breaker.refuses(seamkit.ledger.CLOCK())):
+                self.log(self._record("send", self.seam.sends)(error="BreakerOpen"))
+                raise BreakerOpen(name, why)  # nothing recorded, nothing sent
             return {"ledger": {name: self.intend()}}
         sending = {k: state[k] for k in self.seam.sends}
         if entry["state"] == "unknown":  # sent, answer lost: the same key, or a lookup
@@ -373,12 +380,12 @@ class RemoteAgentNode:
         honoured, skew = self.key_terms()
         first, clock = sent_at(entry, self.seam.timeout), seamkit.ledger.CLOCK
         why = refuse_retry(self.seam.retry, "send", lost, 1, honoured, skew, first,
-                           clock())
+                           clock(), self.breaker_holds())
         if not why:  # the partner answers a repeat with the task the first send opened
             return await retrying(
                 lambda: self._send(sending, entry, key=entry["idempotency_key"]),
                 "send", self.seam.retry, honoured, skew, first, clock, made=1,
-                sleep=self.sleep)
+                sleep=self.sleep, held=self.breaker_holds)
         try:  # a key nobody honours, or a window spent: look, and never send again
             if task := await self.lookup(entry):
                 return task
@@ -386,6 +393,10 @@ class RemoteAgentNode:
             pass
         raise PartnerUnavailable(self.seam.name, f"sent, outcome unknown: {why}",
                                  entry["task_id"])
+
+    def breaker_holds(self) -> str:
+        """Why the seam's breaker refuses new work now (Chapter 14), or ""."""
+        return self.breaker.refuses(seamkit.ledger.CLOCK()) if self.breaker else ""
 
     def held_back(self) -> bool:
         """The send would be refused before it left: no lookup goes first, either."""
@@ -508,6 +519,31 @@ class RemoteAgentNode:
                 error=ContractBreach.__name__))
             raise ContractBreach(
                 self.seam.name, "; ".join(b.detail for b in self.partner.breaches))
+        # Chapter 14: only a send that opens work asks the breaker; a reply to an open
+        # task, a read and a cancel never do
+        breaker = None if (link or {}).get("task_id") else self.breaker
+        if breaker and (why := breaker.allow(seamkit.ledger.CLOCK())):
+            self.log(self._record("send", tuple(data), key or "")(
+                error=BreakerOpen.__name__))
+            raise BreakerOpen(self.seam.name, why)
+        started = seamkit.ledger.CLOCK()
+        error: type[SeamError] | None = None
+        try:
+            task = await self._post(data, link, key)
+            # a task that came back failed or canceled; any other state is an answer
+            failed = OUTCOMES[task.status.state] is PartnerFailed
+            error = PartnerFailed if failed else None
+            return task
+        except SeamError as exc:
+            error = type(exc)
+            raise
+        finally:
+            if breaker:  # the outcome, timed on the clock every owner reads
+                now = seamkit.ledger.CLOCK()
+                breaker.record(error, now - started, now)
+
+    async def _post(self, data: Mapping[str, Any],
+                    link: Mapping[str, Any] | None, key: str | None) -> Task:
         message = new_data_message(
             dict(data), role=Role.ROLE_USER,
             context_id=(link or {}).get("context_id") or None,

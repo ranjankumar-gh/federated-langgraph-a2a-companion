@@ -297,6 +297,32 @@ Run only this chapter's tests with `uv run pytest tests/test_ch12_retries.py`.
 
 Run only this chapter's tests with `uv run pytest tests/test_ch13_compensation.py`.
 
+### Chapter 14: Failure Containment: Breakers, Fallbacks, and the Partner Stop
+
+- `seamkit/breaker.py`: `BreakerPolicy`, read from each seam's `[breaker]` table, and
+  `SeamBreaker`, which counts only a partner's failures to answer, refuses new work while
+  open, admits one trial on the skill the table names, caps the sends in flight, and can be
+  pinned open by a stop. `seamkit/errors.py`: `BreakerOpen`.
+- `seamkit/remote.py`: `RemoteAgentNode` asks the seam's breaker before a send opens work and
+  tells it the outcome after. `seamkit/retry.py`: `refuse_retry` resends nothing while the
+  breaker holds. `seamkit/contract.py`: `Expectations.breaker`, and the `check` rule that
+  refuses a late threshold under the partner's p95. `seamkit/tools.py`: a breaker on a remote
+  skill tool. `seamkit/push.py`: the receiver's flood breaker behind its rate limit.
+- `seamkit/stop.py`: `Stop` and `PartnerStops`, which pin an owner's forward breakers and ring
+  every thread with work there, reading ledgers and never writing them.
+- `meridian/containment.py`: the contained saga graph, each seam's degraded mode (`Contained`),
+  the desk substitute, holds and the hold horizon, and `with_breaker` for the inventory.
+  `meridian/stop_drill.py`: the stop drill's report. `meridian/risk_server.py`: release 2027.02,
+  whose screening states its `basis`, and Risk's own breaker on `estimate_history`.
+  `meridian/incident.py`: `SlowNorthgate` and the `Clocked` wire.
+  `meridian/expectations/`: the `[breaker]` tables and `fraud_screening.contained.toml`.
+- `tests/test_ch14_containment.py`: the incident, Risk containing its own seam, what the
+  breaker counts, the trial and the in-flight cap, the late-threshold check, the desk
+  substitute, a hold released and a hold aborted at its horizon, the stop drill, the stop that
+  shuts the undo door, a release, a push flood, and the inventory's failure column.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch14_containment.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

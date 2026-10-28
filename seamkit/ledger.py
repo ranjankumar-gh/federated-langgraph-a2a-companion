@@ -59,6 +59,8 @@ class LedgerEntry(TypedDict):
     terms: NotRequired[str]  # sha256 of the skill's terms in force at the send
     # Chapter 13: the forward task a compensation entry undoes; absent on every other
     compensates: NotRequired[str]
+    # Chapter 14: the partner stop under which this thread's own run cancelled the task
+    stopped_by: NotRequired[str]
 
 
 def merge_ledger(current: Mapping[str, LedgerEntry],

@@ -1,0 +1,32 @@
+# What Claims depends on from Risk's screen_fraud once Risk's release 2027.02 states how
+# each screening was made (Chapter 14). Claims owns this file. The earlier chapters'
+# federations keep fraud_screening.toml, as they keep Risk's earlier releases.
+seam = "fraud_screening"
+owner = "Risk"
+skill = "screen_fraud"
+sends = ["claim_id", "amount", "days_to_report", "prior_claims"]
+answers = ["police_report"]  # a Claims adjuster answers it
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+slo_seconds = 10.0
+delivery = "stream"  # a blocking send: one answer, seconds long
+lookup = true  # Risk honours no key: look it up before a send, in case one left
+
+[breaker]  # counts only Risk's failures to answer, never what Risk decides
+late_seconds = 8.0  # Risk promises 5 s at p95
+failures = 5  # slower to open than Risk's own breaker on Northgate, which trips at 3
+window_seconds = 60
+open_seconds = 120
+trial = "screen_fraud"  # a screening changes nothing at Risk: any claim may trial
+max_in_flight = 8
+mode = "hold"  # a claim is never cleared unscreened
+
+[reads.fraud_score]
+into = "fraud_score"
+type = "number"
+bounds = [0, 100]  # the referral threshold of 70 is written on this scale
+
+[reads.basis]  # how Risk made this screening: closed to the two values its terms state
+into = "screening_basis"
+type = "string"
+choices = ["full", "without estimate history"]

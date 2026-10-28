@@ -145,6 +145,7 @@ async def connect_saga(
         issuer: MeridianIssuer = CLAIMS_ISSUER,
         trust: Mapping[str, PartnerTrust] = SAGA_TRUST,
         plan: SagaPlan = MERIDIAN_PLAN,
+        expects: Mapping[str, Expectations] = SAGA_EXPECTATIONS,
 ) -> tuple[dict[str, PartnerConnection], dict[str, PartnerConnection]]:
     """The forward connections, held to the plan, and one undo connection per row.
 
@@ -154,15 +155,15 @@ async def connect_saga(
     """
     forward = {seam: apps[seam] for seam in SAGA_SEAMS}
     connections = held_to_plan(plan, await connect_partners(
-        forward, http, issuer, trust, SAGA_EXPECTATIONS, GRANTS))
+        forward, http, issuer, trust, expects, GRANTS))
     undo: dict[str, PartnerConnection] = {}
-    for seam, expects in UNDO_EXPECTATIONS.items():
+    for seam, wants in UNDO_EXPECTATIONS.items():
         url, app = apps[f"{seam}.undo"]
         client = (http or {}).get(f"{seam}.undo") or in_process_http(url, app, "claims")
-        undo[seam] = conn = await connect(url, client, expects, MERIDIAN_POLICY,
-                                          trust=trust[expects.owner])
+        undo[seam] = conn = await connect(url, client, wants, MERIDIAN_POLICY,
+                                          trust=trust[wants.owner])
         assert conn.trust is not None
-        client.auth = UndoAuth("claims", KEYS["claims"], expects.owner.lower(),
+        client.auth = UndoAuth("claims", KEYS["claims"], wants.owner.lower(),
                                UNDO_GRANTS[seam], issuer.compensation_chain, conn.card,
                                conn.trust.covers)
     return connections, undo
@@ -182,9 +183,11 @@ def compensator(undo: Mapping[str, PartnerConnection],
 
 
 def build_saga_graph(workers: Mapping[str, Node], undo: Compensator | None,
-                     checkpointer: BaseCheckpointSaver[Any] | None = None) -> SagaGraph:
+                     checkpointer: BaseCheckpointSaver[Any] | None = None,
+                     schema: type[SagaState] = SagaState) -> SagaGraph:
     """Chapter 1's hub and spokes, with the compensator. `undo=None` is the incident's
-    graph: it refers a reversed claim and ends, and undoes nothing."""
+    graph: it refers a reversed claim and ends, and undoes nothing. `schema` is a
+    later chapter's state, which adds fields to SagaState."""
     steps = {name: Aborts(node) for name, node in workers.items()}
 
     def next_step(state: SagaState) -> str:
@@ -197,7 +200,7 @@ def build_saga_graph(workers: Mapping[str, Node], undo: Compensator | None,
             return COMPENSATE if undo and undo.pending(state) else END
         return next((w for w in steps if w not in done), END)
 
-    graph = StateGraph(SagaState)
+    graph = StateGraph(schema)
     graph.add_node("claims_intake", claims_intake)
     for name, node in steps.items():
         graph.add_node(name, node)

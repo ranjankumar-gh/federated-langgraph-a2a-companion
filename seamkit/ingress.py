@@ -21,7 +21,7 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field as dc_field
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from seamkit.errors import MalformedAnswer, UntrustedEgress
 
@@ -56,6 +56,8 @@ class Provenance(TypedDict):
     release: str  # the partner release that answered
     kind: Kind  # "text" until a closed value stands between it and the partner
     derived_from: list[str]  # the fields it was computed from, Claims' own included
+    # Chapter 14: who answered in the partner's place while its seam was degraded
+    substitute: NotRequired[str]
 
 
 def merge_provenance(current: Mapping[str, Provenance],
