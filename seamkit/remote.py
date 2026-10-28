@@ -14,6 +14,12 @@ Since Chapter 5, `connect` runs the card trust policy first: a card the policy d
 trust has no terms worth checking. The send step refuses an untrusted card, an
 unapproved skill, or a suspended one, and every completed answer is observed in the
 skill's track record under the card's digest (the trust gradient).
+
+Since Chapter 8, every completed answer passes the seam ingress filter after the shape
+check and the field map (seamkit.ingress): a closed value is admitted, free text is
+cleaned, capped and admitted as text, and the tool shape hands a model values only. A
+partner's question and a refusal reason are cleaned and capped before a person or a
+log sees them.
 """
 
 import logging
@@ -54,6 +60,18 @@ from seamkit.errors import (
     PartnerUnavailable,
     SeamError,
     TaskUnfinished,
+    UntrustedEgress,
+)
+from seamkit.ingress import (
+    DETAIL_MAX_CHARS,
+    QUESTION_MAX_CHARS,
+    IngressRule,
+    admit,
+    egress,
+    log_findings,
+    quote,
+    tag,
+    withhold,
 )
 from seamkit.ledger import LedgerEntry, intended, observe, unanswered
 from seamkit.trust import (
@@ -97,6 +115,8 @@ class SeamSpec:
     return_immediately: bool = False  # the send returns once the task exists
     # artifact key -> the shape the seam depends on, from its expectations (Chapter 4)
     shapes: Mapping[str, Field] = field(default_factory=dict)
+    # state field -> its ingress rule (Chapter 8); None is a seam with no filter yet
+    rules: Mapping[str, IngressRule] | None = None
 
 
 @dataclass(frozen=True)
@@ -231,16 +251,22 @@ def refused(exc: A2AClientError) -> str:
     if not (isinstance(cause, httpx.HTTPStatusError)
             and cause.response.status_code == 403):
         return ""
-    try:
-        return str(cause.response.json()["error"]["message"])
+    try:  # partner text on its way to a log and an error a model may read: capped
+        return str(quote(str(cause.response.json()["error"]["message"]),
+                         DETAIL_MAX_CHARS))
     except (ValueError, KeyError, TypeError):
         return "refused"
 
 
 def question_of(task: Task) -> dict[str, Any]:
-    """The partner's question, as the data part of its input-required status message."""
+    """The partner's question, as the data part of its input-required status message.
+
+    It goes to a person through interrupt(), so since Chapter 8 it arrives cleaned,
+    capped, and marked as partner text: whoever shows it quotes it and follows no link.
+    """
     parts = get_data_parts(task.status.message.parts)
-    return {"task_id": task.id, **(parts[0] if parts else {})}
+    asked = quote(parts[0], QUESTION_MAX_CHARS) if parts else {}
+    return {"task_id": task.id, **asked, "partner_text": sorted(asked)}
 
 
 @dataclass
@@ -291,7 +317,10 @@ class RemoteAgentNode:
         An argument the model left unset does not cross: only what it chose is sent.
         """
         chosen = {k: v for k, v in data.items() if v is not None}
-        return self._outcome(await self._send(chosen))
+        answer = self._outcome(await self._send(chosen))
+        if self.seam.rules is None:
+            return answer
+        return withhold(answer, self.seam.rules)  # a model that can act reads no text
 
     def _waits_for_us(self, task: Task) -> bool:
         return self.seam.asks_caller and task.status.state == INPUT_REQUIRED
@@ -313,7 +342,17 @@ class RemoteAgentNode:
         if over := self.partner and self.partner.over_ceiling(self.seam.skill, answer):
             raise CardUntrusted(self.seam.name, over, task.id)
         # The field map: only the keys this seam names reach state, under our names.
-        return {ours: answer[theirs] for theirs, ours in self.seam.receives.items()}
+        mapped = {ours: answer[theirs] for theirs, ours in self.seam.receives.items()}
+        if self.seam.rules is None:  # a seam with no ingress filter (before Chapter 8)
+            return mapped
+        try:
+            admitted = admit(mapped, self.seam.rules, self.seam.name, task.id,
+                             self.partner.release if self.partner else "")
+        except MalformedAnswer:  # a refused field is a malformed answer: it counts
+            self._observe(task.id, clean=False)
+            raise
+        log_findings(self.seam.name, task.id, admitted.findings)
+        return admitted.update  # the tags go beside it, never inside it
 
     def _observe(self, task_id: str, clean: bool) -> None:
         if self.partner is None:  # a node built only to map an answer
@@ -397,3 +436,34 @@ class RemoteAgentNode:
                                   call, sent, idempotency_key=key, **result)
 
         return finish
+
+
+@dataclass
+class FilteredNode(RemoteAgentNode):
+    """The node with the two halves of the ingress filter that need the run's state.
+
+    Before a send: egress, against the provenance of every field the seam sends. After
+    a completed answer: the provenance tag of every field the answer wrote, under
+    `provenance`, beside the update. RemoteAgentNode.__call__ is unchanged.
+    """
+
+    policy: CrossingPolicy = NO_CROSSING  # whose classes may cross to which owner
+
+    async def __call__(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        entry = state.get("ledger", {}).get(self.seam.name)
+        if self.seam.rules is not None and not (entry and entry["task_id"]):
+            sending = {k: state[k] for k in self.seam.sends if k in state}
+            try:
+                egress(sending, state.get("provenance", {}), self.seam.owner,
+                       self.policy, self.seam.name)
+            except UntrustedEgress as exc:  # nothing was built, nothing crossed
+                self.log(self._record("send", tuple(sending))(error=type(exc).__name__))
+                raise
+        update = await super().__call__(state)
+        name = self.seam.name
+        if self.seam.rules is None or name not in update.get("completed", []):
+            return update
+        done = update["ledger"][name]
+        return {**update, "provenance": {
+            wrote: tag(self.seam.rules[wrote], name, done["task_id"],
+                       done["partner_release"]) for wrote in done["wrote"]}}

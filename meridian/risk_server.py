@@ -14,6 +14,10 @@ on the Authorization header the screening request arrived with.
 
 Risk publishes its seam terms on its card (Chapter 4): the score is on 0-100.
 `rescaled=True` deploys release 2026.10's change, a score on 0-1, whatever the card says.
+
+Since Chapter 8, the history tool's answer passes the seam ingress filter under Risk's
+own rules: every field is closed, rows keep only the keys Risk names, and a shop's
+free-text remark never reaches the assistant. `filtered=False` deploys Chapter 7's tool.
 """
 
 import asyncio
@@ -39,6 +43,7 @@ from seamkit.cards import card_digest
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
 from seamkit.delegation import DelegationAuth, Grant, Guard, as_peer, inbound_chain
 from seamkit.errors import SeamError
+from seamkit.ingress import IngressRule
 from seamkit.remote import connect
 from seamkit.revocation import RevocationSource, checked, checker
 from seamkit.server import GraphExecutor, a2a_app, agent_card, delegation_config
@@ -94,6 +99,15 @@ Assistant = Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any] | No
 # Risk's link to Northgate: estimate_history for the claim it is screening, no further.
 NORTHGATE_GRANT = Grant(frozenset({"estimate_history"}), frozenset({"claim_id"}), 0)
 MAX_TOOL_CALLS = 3
+
+# Risk's rules for what estimate_history may put in front of its assistant: all closed.
+HISTORY_RULES: dict[str, IngressRule] = {
+    "shop": IngressRule("shop", "value", pattern=r"SHOP-[0-9]+"),
+    "estimates": IngressRule("estimates", "value", items={
+        "claim_id": IngressRule("claim_id", "value", pattern=r"CLM-[0-9]{4}"),
+        "part": IngressRule("part", "value", pattern=r"[a-z]+"),
+        "amount": IngressRule("amount", "value")}),
+}
 
 
 def require_police_report(state: RiskScreenState) -> RiskScreenState:
@@ -155,6 +169,7 @@ class RiskPartner:
     # before Risk mints onward; None is the list at Meridian's URL.
     revocations: Mapping[str, RevocationSource] | None = None
     now: Callable[[], float] = time.time
+    filtered: bool = True  # Chapter 8: the history tool's answer passes the filter
 
     def __post_init__(self) -> None:
         sources = (revocation_sources() if self.revocations is None
@@ -198,7 +213,9 @@ class RiskPartner:
                 northgate.card, northgate.trust.covers)
             # The argument schema comes from Northgate's published input terms.
             self._tool = remote_skill_tool(northgate, "estimate_history", "Northgate",
-                                           log=lambda record: None)
+                                           log=lambda record: None,
+                                           rules=HISTORY_RULES,
+                                           filtered=self.filtered)
         return self._tool
 
     async def _consult_northgate(self, state: RiskScreenState) -> RiskScreenState:

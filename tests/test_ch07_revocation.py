@@ -36,7 +36,7 @@ from meridian.identity import (
 from meridian.inprocess import ClaimGraph
 from meridian.resume import ResumeGate
 from meridian.samples import suspect_claim
-from northgate.server import NORTHGATE_V7, NORTHGATE_V7_1
+from northgate.server import NORTHGATE_V7, NORTHGATE_V7_2
 from seamkit.contract import check
 from seamkit.delegation import Verified, mint
 from seamkit.drill import Clock, probe
@@ -107,7 +107,7 @@ async def test_the_drill_reports_where_each_owner_noticed() -> None:
     rows = {r.owner: r for r in await revocation_drill(fed, ADJUSTER, at=AT)}
     assert rows["Claims"].first_refusal == 0  # at home there is no copy to go stale
     assert rows["Northgate"].first_refusal == 30  # its copy was pulled at 10:02:30
-    assert rows["Northgate"].agreed == 90  # terms v7.1
+    assert rows["Northgate"].agreed == 90  # terms v7.2
     assert "revoked" in rows["Northgate"].refused_with
     assert fed.outcomes["CLM-1002 at 10:22"] == "DelegationRevoked"
 
@@ -263,10 +263,11 @@ def test_risk_cannot_mint_onward_under_a_revoked_chain() -> None:
 def test_the_seam_contract_holds_the_revocation_term() -> None:
     expects = EXPECTATIONS["repair_estimate"]
     assert expects.revocation_seconds == 120
-    assert check(NORTHGATE_V7_1, expects, MERIDIAN_POLICY) == []  # 90 <= 120
-    [breach] = check(NORTHGATE_V7, expects, MERIDIAN_POLICY)
+    assert check(NORTHGATE_V7_2, expects, MERIDIAN_POLICY) == []  # 90 <= 120
+    v7 = replace(NORTHGATE_V7, skills=NORTHGATE_V7_2.skills)  # v7, with Ch 8's notes
+    [breach] = check(v7, expects, MERIDIAN_POLICY)
     assert breach.detail.endswith("states no revocation horizon")
-    slow = replace(NORTHGATE_V7_1, revocation_seconds=900)
+    slow = replace(NORTHGATE_V7_2, revocation_seconds=900)
     [breach] = check(slow, expects, MERIDIAN_POLICY)
     assert "may act 900 s on a revoked chain" in breach.detail
 

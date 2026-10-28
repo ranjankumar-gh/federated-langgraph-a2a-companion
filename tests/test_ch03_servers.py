@@ -8,6 +8,7 @@ from meridian.claims_server import CLAIMS_URL, claims_agent, claims_app
 from meridian.federated import SEAMS, A2APartners, connect_partners, in_process_http
 from meridian.identity import ADJUSTER_SESSION
 from meridian.incident import connect_with_tokens
+from meridian.risk_server import HISTORY_RULES
 from meridian.samples import clean_claim, suspect_claim
 from northgate.server import NorthgatePartner
 from seamkit.errors import PartnerNeedsInput
@@ -62,8 +63,10 @@ async def test_a_remote_skill_tool_is_built_from_the_card_as_fetched() -> None:
     conns = await connect_with_tokens(partners.apps())
     records: list[CrossingRecord] = []
     # Since Chapter 4 the argument schema comes from Northgate's published terms.
+    # Since Chapter 8 the caller's ingress rules close what the model may read; without
+    # them every string the tool returns is withheld as partner text.
     tool = remote_skill_tool(conns["repair_estimate"], "estimate_history", "Northgate",
-                             log=records.append)
+                             log=records.append, rules=HISTORY_RULES)
     assert tool.name == "estimate_history"
     assert tool.description.startswith("Past estimates")
     out = await tool.ainvoke({"claim_id": "CLM-1002"})  # what a model's call does

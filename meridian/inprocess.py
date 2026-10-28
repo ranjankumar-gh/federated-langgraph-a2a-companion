@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from meridian.agents import estimate_repair, pay, screen_fraud
+from seamkit.ingress import Provenance, merge_provenance
 from seamkit.ledger import LedgerEntry, merge_ledger
 
 
@@ -29,11 +30,16 @@ class ClaimState(TypedDict, total=False):
     fraud_score: float  # 0-100: the scale the Claims threshold was written against
     fraud_signals: list[str]
     repair_estimate: float
+    estimate_notes: str  # the shop's notes, through Northgate: partner text (Chapter 8)
+    note_findings: dict[str, Any]  # what the quarantined reader found, closed
+    payment_memo: str  # the remittance memo Finance prints on the payment
     payment_ref: str
     decision: str  # "paid" or "refer"
     completed: Annotated[list[str], operator.add]
     # seam -> Claims' record of the task it sent there; merged with a version check
     ledger: Annotated[dict[str, LedgerEntry], merge_ledger]
+    # field -> the seam, task and release that wrote it, or what it was derived from
+    provenance: Annotated[dict[str, Provenance], merge_provenance]
 
 
 CLAIM_FIELDS = frozenset(ClaimState.__annotations__)

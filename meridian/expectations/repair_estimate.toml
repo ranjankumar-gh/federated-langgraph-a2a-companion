@@ -13,3 +13,8 @@ slo_seconds = 10.0
 into = "repair_estimate"
 type = "number"
 unit = "claim currency"
+
+[reads.notes]  # the shop's own words, passed through by Northgate: text
+into = "estimate_notes"
+type = "string"
+max_chars = 600  # room for any real note; a padded one is refused

@@ -84,3 +84,11 @@ class DelegationRevoked(DelegationRefused):
     issuer's list (after it cancels the task), by a partner's guard for any call but
     the task's own cancel, and before a link is minted under a revoked chain.
     """
+
+
+class UntrustedEgress(SeamError):
+    """A send would carry partner text, or a data class the receiving owner may not hold.
+
+    A field a model wrote from a partner's text carries that text, and every data class
+    of what the model read. Raised before anything is sent; only that seam stops.
+    """

@@ -49,7 +49,8 @@ ROOT = Grant(
     skills=frozenset({"screen_fraud", "estimate_history", "estimate_repair",
                       "pay_claim"}),
     fields=frozenset({"claim_id", "amount", "days_to_report", "prior_claims",
-                      "damaged_parts", "repair_estimate", "police_report"}),
+                      "damaged_parts", "repair_estimate", "police_report",
+                      "payment_memo"}),
     hops=2)
 
 ROOT_LIFETIME = 15 * 60.0  # seconds; every link below expires no later

@@ -137,6 +137,28 @@ Run only this chapter's tests with `uv run pytest tests/test_ch05_trust.py`.
 
 Run only this chapter's tests with `uv run pytest tests/test_ch07_revocation.py`.
 
+### Chapter 8: Remote Output Is Untrusted Input
+
+- `seamkit/ingress.py`: the seam ingress filter. `IngressRule` closes a field as a value or
+  quarantines it as text; `rules_of` reads the rules from the expectations (`pattern`,
+  `choices`, `max_chars` in a `[reads.*]` table); `admit` cleans, caps, refuses and tags;
+  `signals` is the alarm that decides nothing; `Provenance` and `derive` are the provenance
+  tag; `egress` refuses a send carrying partner text or a class its receiver may not hold.
+- `seamkit/remote.py`: `_outcome` and `call_once` run the filter after the shape check; the
+  tool shape hands a model closed values only; `question_of` and refusal details are cleaned
+  and capped; `FilteredNode` checks egress before a send and attaches the tags.
+  `UntrustedEgress` is in `seamkit/errors.py`.
+- `meridian/review.py`: Claims' review, split into the quarantined reader (`read_notes`,
+  `NoteFindings`) and the acting node (`reviewer`), with the memo from a template.
+- `northgate/server.py`: terms revision `v7.2` adds the shop's `notes`; history rows may carry
+  a shop's `remark`. `meridian/finance_server.py`: release `2026.11` accepts a `payment_memo`.
+- `meridian/risk_server.py`: Risk's own rules for `estimate_history` (`HISTORY_RULES`).
+- `meridian/incident.py`: `naive_reviewer` and `obeys_notes`, the chapter's opening incident.
+- `tests/test_ch08_ingress.py`: the incident, the filter, quarantine against the most
+  credulous model, egress, the peer seam, and the question a person reads.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch08_ingress.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

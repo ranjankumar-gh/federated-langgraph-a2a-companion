@@ -14,7 +14,8 @@ DATA_CLASSES: dict[str, str] = {
     "photo_url": "vehicle",
     "prior_claims": "claim_history",
     "fraud_score": "fraud_assessment", "fraud_signals": "fraud_assessment",
-    "repair_estimate": "estimate",
+    "repair_estimate": "estimate", "estimate_notes": "estimate",
+    "note_findings": "estimate", "payment_memo": "estimate",
     "policy": "policy",
 }
 

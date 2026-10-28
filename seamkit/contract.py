@@ -9,6 +9,7 @@ reads declarations only: a partner whose behaviour changes under unchanged terms
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from dataclasses import field as dc_field
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -93,6 +94,9 @@ class Expectations:
     skew_seconds: int = 0
     slo_seconds: float = 10.0
     revocation_seconds: int | None = None  # the most we accept; None asks for nothing
+    # Chapter 8: artifact key -> how a read is closed (pattern, choices, items) or
+    # capped (max_chars); seamkit.ingress turns these into the seam's ingress rules.
+    ingress: Mapping[str, Mapping[str, Any]] = dc_field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -292,17 +296,26 @@ def load_expectations(path: Path) -> Expectations:
         auth=tuple(raw.get("auth", [])), skew_seconds=int(raw.get("skew_seconds", 0)),
         slo_seconds=float(raw.get("slo_seconds", 10.0)),
         revocation_seconds=(int(raw["revocation_seconds"])
-                            if "revocation_seconds" in raw else None))
+                            if "revocation_seconds" in raw else None),
+        ingress={key: {k: v for k, v in spec.items() if k in INGRESS_KEYS}
+                 for key, spec in reads.items()})
+
+
+# The keys of a [reads.*] table the ingress filter reads (Chapter 8); the shape check
+# never looks at them.
+INGRESS_KEYS = frozenset({"max_chars", "pattern", "choices", "items"})
 
 
 def seam_spec(expects: Expectations) -> "SeamSpec":
     """Chapter 3's SeamSpec, derived from the expectations instead of typed by hand."""
     # Imported here, not at the top: seamkit.remote imports Field from this module.
+    from seamkit.ingress import rules_of
     from seamkit.remote import SeamSpec
 
     return SeamSpec(expects.seam, expects.owner, expects.skill, expects.sends,
                     receives=dict(expects.into), asks_caller=bool(expects.answers),
-                    timeout=expects.slo_seconds, shapes=dict(expects.reads))
+                    timeout=expects.slo_seconds, shapes=dict(expects.reads),
+                    rules=rules_of(expects))
 
 
 def args_model(skill_id: str, skill: SkillTerms) -> type[BaseModel]:

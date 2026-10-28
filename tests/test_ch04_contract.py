@@ -20,7 +20,7 @@ from meridian.federated import (
 from meridian.inprocess import CLAIM_FIELDS, ClaimState
 from meridian.risk_server import RISK_TERMS, RISK_TERMS_0_1, RiskPartner
 from meridian.samples import clean_claim, suspect_claim
-from northgate.server import NORTHGATE_V7_1, NORTHGATE_V8, NorthgatePartner
+from northgate.server import NORTHGATE_V7_2, NORTHGATE_V8, NorthgatePartner
 from seamkit.contract import (
     EXTENSION_URI,
     Field,
@@ -46,7 +46,7 @@ async def test_terms_survive_the_card_fetch() -> None:
     northgate = conns["repair_estimate"]
     [extension] = northgate.card.capabilities.extensions
     assert (extension.uri, extension.required) == (EXTENSION_URI, False)  # data only
-    assert terms_of(northgate.card) == (NORTHGATE_V7_1,) == northgate.terms
+    assert terms_of(northgate.card) == (NORTHGATE_V7_2,) == northgate.terms
     assert terms_of(conns["fraud_screening"].card) == (RISK_TERMS,)
 
 
@@ -58,7 +58,8 @@ async def test_every_meridian_seam_holds_today() -> None:
 
 def test_seams_are_derived_from_the_expectations_not_typed() -> None:
     assert SEAMS["repair_estimate"].sends == ("claim_id", "damaged_parts")
-    assert SEAMS["repair_estimate"].receives == {"estimate": "repair_estimate"}
+    assert SEAMS["repair_estimate"].receives == {"estimate": "repair_estimate",
+                                                 "notes": "estimate_notes"}  # Ch 8
     assert SEAMS["fraud_screening"].asks_caller is True  # it answers police_report
     assert SEAMS["repair_estimate"].asks_caller is False  # it refuses photo_url
     assert list(SEAMS) == ["fraud_screening", "repair_estimate", "payments"]
@@ -112,7 +113,7 @@ def test_the_whole_state_send_is_refused_by_data_class() -> None:
     # Chapter 1's naive seam sent every field it had to Northgate.
     every_field = sorted(CLAIM_FIELDS - {"completed", "ledger"})
     whole = replace(ESTIMATE, sends=tuple(every_field))
-    found = {b.detail for b in check(NORTHGATE_V7_1, whole, MERIDIAN_POLICY)}
+    found = {b.detail for b in check(NORTHGATE_V7_2, whole, MERIDIAN_POLICY)}
     assert "estimate_repair would receive fraud_score, which is fraud_assessment data" \
         in found
     assert "estimate_repair would receive prior_claims, which is claim_history data" \
@@ -123,28 +124,28 @@ def test_the_whole_state_send_is_refused_by_data_class() -> None:
 
 def test_an_unclassified_field_crosses_nowhere() -> None:
     adds = replace(ESTIMATE, sends=(*ESTIMATE.sends, "adjuster_notes"))
-    repair = NORTHGATE_V7_1.skills["estimate_repair"]
+    repair = NORTHGATE_V7_2.skills["estimate_repair"]
     notes = Field("adjuster_notes", "string", required=False)
-    v7 = replace(NORTHGATE_V7_1, skills={
-        **NORTHGATE_V7_1.skills,
+    v7 = replace(NORTHGATE_V7_2, skills={
+        **NORTHGATE_V7_2.skills,
         "estimate_repair": replace(repair, inputs=(*repair.inputs, notes))})
     [breach] = check(v7, adds, MERIDIAN_POLICY)
     assert breach.detail.endswith("adjuster_notes, which is unclassified data")
 
 
 def test_a_new_question_from_the_partner_is_a_breach() -> None:
-    repair = NORTHGATE_V7_1.skills["estimate_repair"]
-    asks_more = replace(NORTHGATE_V7_1, skills={
-        **NORTHGATE_V7_1.skills,
+    repair = NORTHGATE_V7_2.skills["estimate_repair"]
+    asks_more = replace(NORTHGATE_V7_2, skills={
+        **NORTHGATE_V7_2.skills,
         "estimate_repair": replace(repair, asks=(*repair.asks, "vin"))})
     [breach] = check(asks_more, ESTIMATE, MERIDIAN_POLICY)
     assert "may ask for vin" in breach.detail
 
 
 def test_slower_promise_and_changed_skew_are_breaches() -> None:
-    repair = NORTHGATE_V7_1.skills["estimate_repair"]
-    slower = replace(NORTHGATE_V7_1, skew_seconds=120, skills={
-        **NORTHGATE_V7_1.skills, "estimate_repair": replace(repair, p95_seconds=30.0)})
+    repair = NORTHGATE_V7_2.skills["estimate_repair"]
+    slower = replace(NORTHGATE_V7_2, skew_seconds=120, skills={
+        **NORTHGATE_V7_2.skills, "estimate_repair": replace(repair, p95_seconds=30.0)})
     details = [b.detail for b in check(slower, ESTIMATE, MERIDIAN_POLICY)]
     assert details == [
         "estimate_repair tolerates 120 s of clock skew, not the 30 s agreed",
@@ -190,7 +191,7 @@ async def test_the_tool_schema_is_generated_from_the_partner_terms() -> None:
     tool = remote_skill_tool(conns["repair_estimate"], "estimate_history", "Northgate",
                              log=lambda record: None)
     schema = tool.args_schema.model_json_schema()  # type: ignore[union-attr]
-    inputs = NORTHGATE_V7_1.skills["estimate_history"].inputs  # Northgate's, not ours
+    inputs = NORTHGATE_V7_2.skills["estimate_history"].inputs  # Northgate's, not ours
     assert set(schema["properties"]) == {f.name for f in inputs}
     assert set(schema.get("required", [])) == {f.name for f in inputs if f.required}
 
@@ -211,12 +212,12 @@ async def test_the_inventory_contract_column_comes_from_the_check() -> None:
     answers = {e.callee: e.answers["contract"] for e in inventory.entries}
     assert answers == {
         "fraud_screening": "terms 2026.09 checked",
-        "repair_estimate": "terms v7.1 checked; v8 breaks it from 2026-11-02",
-        "payments": "terms 2026.10 checked"}
+        "repair_estimate": "terms v7.2 checked; v8 breaks it from 2026-11-02",
+        "payments": "terms 2026.11 checked"}
 
 
 def test_skill_terms_declare_what_later_chapters_enforce() -> None:
-    repair = NORTHGATE_V7_1.skills["estimate_repair"]
+    repair = NORTHGATE_V7_2.skills["estimate_repair"]
     assert isinstance(repair, SkillTerms)
     assert repair.cost_per_task == 3.5  # read from Chapter 18
     assert repair.compensated_by == ""  # nothing undoes an estimate yet: Chapter 13

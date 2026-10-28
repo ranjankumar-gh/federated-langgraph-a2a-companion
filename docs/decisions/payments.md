@@ -21,7 +21,7 @@ a2a_agent. A seam. Harden first: contract (Ch 4, 15), authority (Ch 5-8)
 - mcp_tool: Finance runs its own state, people and task lifecycle behind the call
 
 ## Predicted costs
-- re-sent per task: 3 fields (claim_id, amount, repair_estimate)
+- re-sent per task: 4 fields (claim_id, amount, repair_estimate, payment_memo)
 - latency: a queue we do not run (per-seam p99, Ch 14)
 - checkpoint visibility: Finance's steps stay in Finance's checkpoint
 

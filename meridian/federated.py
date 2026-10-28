@@ -14,6 +14,10 @@ delegation hook asks before authority goes to that card.
 Every partner connection carries a DelegationAuth: each call mints a link under the
 run's chain, scoped by the seam's grant, and sends the chain. The chain's root comes
 from Meridian's issuer, exchanged from the adjuster's session the run carries.
+
+Since Chapter 8, every answer passes the seam ingress filter, each node checks egress
+before it sends, and an in-process review node (meridian.review) sits between the
+estimate and the payment. It is Claims' own, so it is not a seam.
 """
 
 from collections.abc import Callable, Mapping
@@ -29,8 +33,9 @@ from starlette.types import ASGIApp
 from meridian.data_classes import MERIDIAN_POLICY
 from meridian.finance_server import FINANCE_URL, FinancePartner
 from meridian.identity import CLAIMS_ISSUER, KEYS, MeridianIssuer
-from meridian.inprocess import ClaimGraph, build_graph
+from meridian.inprocess import ClaimGraph, Node, build_graph
 from meridian.resume import ResumeGate
+from meridian.review import REVIEW, Reader, keyword_reader, reviewer
 from meridian.risk_server import RISK_URL, RiskPartner
 from meridian.trust import MERIDIAN_TRUST
 from northgate.server import NORTHGATE_URL, NorthgatePartner
@@ -58,7 +63,8 @@ EXPECTATIONS: dict[str, Expectations] = {
 SEAMS: dict[str, SeamSpec] = {name: seam_spec(e) for name, e in EXPECTATIONS.items()}
 
 # The owner map the seam inventory reads, derived from the seams rather than retyped.
-OWNERS_A2A = {"claims_intake": "Claims", **{s.name: s.owner for s in SEAMS.values()}}
+OWNERS_A2A = {"claims_intake": "Claims", REVIEW: "Claims",
+              **{s.name: s.owner for s in SEAMS.values()}}
 
 # What each seam's link grants: the seam's own skill and the fields it sends, plus what
 # the partner may pass on, and how many hops below it. Risk may ask Northgate for the
@@ -190,8 +196,19 @@ def a2a_workers(connections: Mapping[str, PartnerConnection],
     if not gates:
         return {name: RemoteAgentNode(spec, connections[name], log, authority)
                 for name, spec in seams.items()}
-    return {name: ResumeGate(spec, connections[name], log, authority, issuer=issuer)
+    return {name: ResumeGate(spec, connections[name], log, authority,
+                             policy=MERIDIAN_POLICY, issuer=issuer)
             for name, spec in seams.items()}
+
+
+def with_review(nodes: Mapping[str, Node], review: Node) -> dict[str, Node]:
+    """The workers in the router's order, with Claims' review right after the estimate."""
+    workers: dict[str, Node] = {}
+    for name, node in nodes.items():
+        workers[name] = node
+        if name == "repair_estimate":
+            workers[REVIEW] = review
+    return workers
 
 
 def build_a2a_graph(connections: Mapping[str, PartnerConnection],
@@ -200,9 +217,12 @@ def build_a2a_graph(connections: Mapping[str, PartnerConnection],
                     seams: Mapping[str, SeamSpec] = SEAMS,
                     issuer: MeridianIssuer = CLAIMS_ISSUER,
                     gates: bool = True,
+                    review: Node | None = None,
+                    reader: Reader = keyword_reader,
                     ) -> ClaimGraph:
-    return build_graph(a2a_workers(connections, log, seams, issuer, gates),
-                       checkpointer)
+    """`review` replaces the review node (the incident's); `reader` is its model."""
+    nodes = a2a_workers(connections, log, seams, issuer, gates)
+    return build_graph(with_review(nodes, review or reviewer(reader)), checkpointer)
 
 
 def with_revocation(inventory: SeamInventory,
@@ -220,8 +240,25 @@ def with_revocation(inventory: SeamInventory,
     return inventory
 
 
+def with_ingress(inventory: SeamInventory,
+                 seams: Mapping[str, SeamSpec] = SEAMS) -> SeamInventory:
+    """Add each seam's ingress filter to its authority answer, from its rules."""
+    for entry in inventory.entries:
+        spec = seams.get(entry.callee)
+        if spec is None:
+            continue
+        held = entry.answers.get("authority", "")
+        if spec.rules is None:
+            entry.answers["authority"] = held + "; ingress unfiltered"
+            continue
+        text = sum(1 for rule in spec.rules.values() if rule.kind == "text")
+        entry.answers["authority"] = held + (
+            f"; ingress filtered, {text} text field(s) quarantined")
+    return inventory
+
+
 __all__ = ["EXPECTATIONS", "GRANTS", "with_authority", "with_contract", "with_trust",
-           "with_revocation", "a2a_workers",
+           "with_revocation", "with_ingress", "with_review", "a2a_workers",
            "OWNERS_A2A",
            "SEAMS", "A2APartners",
            "CrossingRecord", "build_a2a_graph",

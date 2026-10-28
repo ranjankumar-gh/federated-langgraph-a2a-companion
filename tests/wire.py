@@ -14,7 +14,8 @@ from starlette.types import ASGIApp
 
 from meridian.federated import SEAMS, A2APartners, build_a2a_graph, connect_partners
 from meridian.identity import ADJUSTER_SESSION, CLAIMS_ISSUER, MeridianIssuer
-from meridian.inprocess import ClaimGraph
+from meridian.inprocess import ClaimGraph, Node
+from meridian.review import Reader, keyword_reader
 from meridian.risk_server import RiskPartner
 from seamkit.delegation import as_peer
 from seamkit.remote import CrossingRecord, PartnerConnection, SeamSpec
@@ -66,13 +67,16 @@ class Federation:
     async def graph(self, http: dict[str, httpx.AsyncClient] | None = None,
                     checkpointer: BaseCheckpointSaver[Any] | None = None,
                     apps: Mapping[str, tuple[str, ASGIApp]] | None = None,
+                    review: Node | None = None,
+                    reader: Reader = keyword_reader,
                     ) -> ClaimGraph:
-        """`apps` replaces a seam's deployment, such as one a registry lookup chose."""
+        """`apps` replaces a seam's deployment, such as one a registry lookup chose.
+        `review` and `reader` replace Claims' review node, or only its model."""
         deployed = {**self.partners.apps(), **(apps or {})}
         self.connections = await connect_partners(deployed, http, issuer=self.issuer)
         return build_a2a_graph(self.connections, checkpointer,
                                log=self.records.append, seams=self.seams,
-                               issuer=self.issuer)
+                               issuer=self.issuer, review=review, reader=reader)
 
 
 def slow_risk() -> RiskPartner:

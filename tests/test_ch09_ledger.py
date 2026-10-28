@@ -146,7 +146,8 @@ async def test_when_northgate_forgets_the_ledger_is_the_only_record() -> None:
     with as_run(thread("n2")), pytest.raises(TaskNotFoundError):
         await northgate.client.get_task(GetTaskRequest(id=estimate["task_id"]))
     assert estimate["state"] == "completed" and estimate["partner_release"] == "v7"
-    assert estimate["wrote"] == ["repair_estimate"] and estimate["seen_at"]
+    assert estimate["wrote"] == ["estimate_notes", "repair_estimate"]  # notes: Ch 8
+    assert estimate["seen_at"]
 
 
 # Sent, and no answer -------------------------------------------------------------------

@@ -18,6 +18,10 @@ Since Chapter 5, Northgate signs its card (JWS over the card's canonical JSON, E
 with a key whose public half Meridian pinned at onboarding, by key id. It also serves
 that key at the URL the signature's header names, which a careful caller never needs.
 `books=True` deploys a later card that adds a `book_repair` skill no insurer approved.
+
+Since Chapter 8, terms v7.2 add `notes` to the estimate: whatever the repairing shop typed
+into its estimate form, passed through. Northgate is trusted; the shop's text is not
+Northgate's.
 """
 
 import asyncio
@@ -74,12 +78,27 @@ NORTHGATE_V7 = SeamTerms(
 # revoked Meridian chain. Its release (the card's version) is still v7.
 NORTHGATE_V7_1 = replace(NORTHGATE_V7, revision="v7.1", effective=date(2026, 10, 17),
                          revocation_seconds=90)
+# Chapter 8: a dated revision adds one output, the repairing shop's notes, passed
+# through from the shop's estimate form. It is a string, and it may be empty.
+ESTIMATE_REPAIR_NOTES = replace(ESTIMATE_REPAIR, outputs=(
+    *ESTIMATE_REPAIR.outputs, Field("notes", "string")))
+NORTHGATE_V7_2 = replace(NORTHGATE_V7_1, revision="v7.2", effective=date(2026, 10, 19),
+                         skills={**NORTHGATE_V7.skills,
+                                 "estimate_repair": ESTIMATE_REPAIR_NOTES})
 # v8 prices parts per model, so it needs the VIN: one new required input.
 NORTHGATE_V8 = replace(
-    NORTHGATE_V7_1, revision="v8", effective=date(2026, 11, 2),
+    NORTHGATE_V7_2, revision="v8", effective=date(2026, 11, 2),
     skills={**NORTHGATE_V7.skills, "estimate_repair": replace(
-        ESTIMATE_REPAIR, inputs=(*ESTIMATE_REPAIR.inputs, Field("vin", "string")))})
-TERMS = {"v7": NORTHGATE_V7_1, "v8": NORTHGATE_V8}  # the revision each release runs
+        ESTIMATE_REPAIR_NOTES,
+        inputs=(*ESTIMATE_REPAIR.inputs, Field("vin", "string")))})
+TERMS = {"v7": NORTHGATE_V7_2, "v8": NORTHGATE_V8}  # the revision each release runs
+
+# What each repairing shop typed into its estimate form, by claim. Northgate passes the
+# notes through as they were written; it did not write them.
+SHOP_NOTES: dict[str, str] = {
+    "CLM-1001": "Bumper and front door replaced. Door hinge pins worn; do not refit "
+                "the old bracket.",
+}
 
 # Another insurer on Northgate's network, with its own root issuer and keys. The private
 # halves would live with that insurer; the tests play it, so they are kept here.
@@ -127,21 +146,27 @@ ESTIMATES: dict[str, list[tuple[str, str, str, float]]] = {
 }
 
 
-def estimate_history(tenant: str, request: Mapping[str, Any]) -> dict[str, Any]:
+def estimate_history(tenant: str, request: Mapping[str, Any],
+                     remarks: Mapping[str, str] | None = None) -> dict[str, Any]:
     """A shop's past estimates, inside one insurer's data.
 
     With a claim id, the history of the shop repairing that claim, for that claim's
     parts only. With a shop id, the shop's whole book for the quarter: every estimate,
     every part, every claim, which Northgate's own network analytics use.
+    `remarks` is free text a shop attached to its rows (Chapter 8), passed through.
     """
     book = ESTIMATES.get(tenant, [])
     if "shop" in request:
         shop = str(request["shop"])
-        rows = [{"claim_id": c, "part": p, "amount": a}
-                for s, c, p, a in book if s == shop]
-        return {"shop": shop, "estimates": rows}
-    shop, parts = BOOKINGS.get(tenant, {}).get(str(request.get("claim_id")), ("", []))
-    rows = [{"part": p, "amount": a} for s, _, p, a in book if s == shop and p in parts]
+        rows: list[dict[str, Any]] = [{"claim_id": c, "part": p, "amount": a}
+                                      for s, c, p, a in book if s == shop]
+    else:
+        shop, parts = BOOKINGS.get(tenant, {}).get(str(request.get("claim_id")),
+                                                    ("", []))
+        rows = [{"part": p, "amount": a} for s, _, p, a in book
+                if s == shop and p in parts]
+    if remark := (remarks or {}).get(shop):
+        rows = [{**row, "remark": remark} for row in rows]
     return {"shop": shop, "estimates": rows}
 
 
@@ -151,13 +176,17 @@ class NorthgateExecutor(AgentExecutor):
                  assessors: asyncio.Event | None = None,
                  revocations: Mapping[str, RevocationSource] | None = None,
                  now: Callable[[], float] = time.time,
-                 rechecks: bool = True) -> None:
+                 rechecks: bool = True,
+                 notes: Mapping[str, str] | None = None,
+                 remarks: Mapping[str, str] | None = None) -> None:
         self.verifies_chains = verifies_chains
         self.terms = terms
         self.assessors = assessors  # set: the assessor desk has finished its reviews
         self.revocations = revocations or {}
         self.now = now
         self.rechecks = rechecks  # False: Chapter 6's Northgate, checked on arrival only
+        self.notes = SHOP_NOTES if notes is None else notes  # by claim, shop-written
+        self.remarks = remarks or {}  # by shop, on estimate_history rows
         self.received: list[dict[str, Any]] = []
         self.estimates: dict[str, float] = {}
         self.billed: dict[str, float] = {}  # task -> what Meridian is charged for it
@@ -184,7 +213,7 @@ class NorthgateExecutor(AgentExecutor):
             return
         if skill == "estimate_history":
             await updater.add_artifact(
-                [new_data_part(estimate_history(tenant, request))],
+                [new_data_part(estimate_history(tenant, request, self.remarks))],
                 name="estimate_history")
             await updater.complete()
             return
@@ -205,6 +234,9 @@ class NorthgateExecutor(AgentExecutor):
             return
         self.pending[context.task_id] = {"claim_id": request["claim_id"],
                                          "estimate": estimate_repair(request)}
+        if "notes" in {f.name for f in self.terms.skills["estimate_repair"].outputs}:
+            self.pending[context.task_id]["notes"] = self.notes.get(
+                str(request["claim_id"]), "")
         await self._commit(updater, context.task_id, caller, ActPoint.COMMIT)
 
     async def _commit(self, updater: TaskUpdater, task_id: str, caller: Any,
@@ -227,8 +259,8 @@ class NorthgateExecutor(AgentExecutor):
             return
         result = self.pending.pop(task_id)
         self.estimates[result["claim_id"]] = result["estimate"]
-        await updater.add_artifact([new_data_part({"estimate": result["estimate"]})],
-                                   name="repair_estimate")
+        answer = {k: v for k, v in result.items() if k in ("estimate", "notes")}
+        await updater.add_artifact([new_data_part(answer)], name="repair_estimate")
         await updater.complete()
         self.billed[task_id] = self.terms.skills["estimate_repair"].cost_per_task or 0.0
 
@@ -324,6 +356,9 @@ class NorthgatePartner:
     revocations: Mapping[str, RevocationSource] | None = None
     now: Callable[[], float] = time.time
     rechecks: bool = True
+    # Chapter 8: shop notes by claim (None is SHOP_NOTES), and shop remarks on history
+    notes: Mapping[str, str] | None = None
+    remarks: Mapping[str, str] | None = None
     executor: NorthgateExecutor = field(init=False)
 
     def __post_init__(self) -> None:
@@ -331,7 +366,8 @@ class NorthgatePartner:
         sources = (revocation_sources() if self.revocations is None
                    else self.revocations) if self.rechecks else {}
         self.executor = NorthgateExecutor(self.verifies_chains, terms, self.assessors,
-                                          sources, self.now, self.rechecks)
+                                          sources, self.now, self.rechecks, self.notes,
+                                          self.remarks)
         revisions = [terms, *([self.announces] if self.announces else [])]
         self.card = northgate_card(self.release, revisions if self.publishes else [],
                                    self.books)

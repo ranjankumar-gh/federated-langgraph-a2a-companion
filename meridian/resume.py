@@ -12,6 +12,8 @@ follow-up on the same task, under this run's chain, only if that chain acts for 
 same person and covers the same claim; otherwise the gate raises PartnerNeedsAuth.
 
 RemoteAgentNode.__call__ is unchanged: the gate is a subclass that checks, then calls it.
+Since Chapter 8 the gate's parent is FilteredNode, which adds the ingress filter's
+egress check before a send and the provenance tag after an answer.
 """
 
 import logging
@@ -29,13 +31,13 @@ from meridian.identity import CLAIMS_ISSUER, MeridianIssuer
 from seamkit.delegation import run_values
 from seamkit.errors import DelegationRefused, DelegationRevoked, PartnerNeedsAuth
 from seamkit.ledger import TERMINAL
-from seamkit.remote import RemoteAgentNode
+from seamkit.remote import FilteredNode
 
 logger = logging.getLogger("meridian.resume")
 
 
 @dataclass
-class ResumeGate(RemoteAgentNode):
+class ResumeGate(FilteredNode):
     """An A2A call node with Claims' resume act point in front of it."""
 
     issuer: MeridianIssuer = field(default_factory=lambda: CLAIMS_ISSUER)
