@@ -1,0 +1,32 @@
+# What Claims depends on from Northgate's estimate_repair once an auditor may ask for
+# the evidence behind a decision (Chapter 19). Claims owns this file. The earlier
+# chapters' federations keep repair_estimate.toml and repair_estimate.receipted.toml.
+seam = "repair_estimate"
+owner = "Northgate"
+skill = "estimate_repair"
+protocols = ["1.0"]  # Chapter 15: newest first; a card offering none is a breach
+sends = ["claim_id", "damaged_parts"]
+refuses = ["photo_url"]  # no Claims human photographs a car
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+revocation_seconds = 120  # the longest a revoked chain may act at Northgate
+slo_seconds = 10.0
+delivery = "push"  # the assessor desk takes about 21 minutes on frame damage
+backstop_seconds = 300  # a lost push is found within five minutes
+notice_days = 21  # Chapter 15: a breaking revision is on the card 3 weeks ahead
+receipts = "countersigned"  # Chapter 17: Northgate signs its half of every receipt
+
+[evidence]  # Chapter 19: what Claims needs Northgate to keep, for an auditor
+retain_days = 2555  # seven years
+produce_within_days = 14  # the regulator's deadline for a pack
+witness = "daily"  # Northgate signs the head of Claims' receipt log every day
+
+[reads.estimate]
+into = "repair_estimate"
+type = "number"
+unit = "claim currency"
+
+[reads.notes]  # the shop's own words, passed through by Northgate: text
+into = "estimate_notes"
+type = "string"
+max_chars = 600  # room for any real note; a padded one is refused

@@ -441,6 +441,35 @@ tests/test_ch17_ownership.py`.
 Run only this chapter's tests with `uv run pytest tests/test_ch18_costs.py
 tests/test_ch18_invoice.py`.
 
+### Chapter 19: Audit Evidence Across Organisations
+
+- `seamkit/evidence.py`: `Witness` and `witnessed` (a partner signs the head of Claims'
+  receipt log daily, and the log must still reach it), `Opening` (one field of one claim,
+  produced on request and never logged), `Gap`, `EvidencePack`, `build_pack` (each owner
+  over its own stores), `join` (by delegation chain), `gaps` (the auditor's check) and
+  `with_evidence` (the accountability column). Gaps route through the ownership map as
+  the new signal kind `evidence`.
+- `seamkit/contract.py`: `EvidenceTerms` (`retain_days`, `produce_within_days`,
+  `witness`) on terms and on expectations (`[evidence]`), `SkillTerms.reads` and
+  `regions`, `revised` (a partner's next revision, read from its own file), and the rule
+  `_evidence` that `check` calls: a field the skill does not declare, a class sent to a
+  region it may not go to, or evidence terms below what the seam expects.
+- `meridian/data_classes.py`: `STAYS_IN`, `STAYS_IN_STRICT` and `STRICT_POLICY`.
+  `meridian/contracts/northgate.v7.6.toml` and `risk.2027.06.toml`: the partners' terms
+  files. `meridian/expectations/*.evidenced.toml`: the screening and estimate seams with
+  their `[evidence]` tables.
+- `meridian/risk_server.py`: release 2027.06 signs a `DecisionRecord` per screening and
+  keeps it, with each field's opening, in `EvidenceStore`, apart from the thread Risk
+  prunes. `seamkit/tools.py` and `seamkit/remote.py`: Risk's tool calls to Northgate are
+  receipted. `northgate/server.py`: terms v7.6 and `NorthgatePartner.witness`.
+- `tests/test_ch19_evidence.py`: the referral no one could explain, the fixed packs, an
+  opening, a dropped receipt, erasure, retention, the watching record and a forged pack.
+  `tests/test_ch19_terms.py`: the terms files, `check`'s rule, the stricter residency
+  policy, the inventory and the route.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch19_evidence.py
+tests/test_ch19_terms.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

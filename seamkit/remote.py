@@ -644,7 +644,14 @@ class RemoteAgentNode:
         `key` is the message id, when the caller derives one (Chapter 12).
         """
         chosen = {k: v for k, v in data.items() if v is not None}
-        answer = self._outcome(await self._send(chosen, key=key))
+        task = await self._send(chosen, key=key)
+        if self.receipts is not None and key:  # Chapter 19: a tool call is receipted
+            seen = cast(LedgerEntry, {
+                **self.intend(), "idempotency_key": key,
+                "state": state_name(task.status.state),
+                "sent": self.receipts.sent(chosen, key)})
+            self.receipt(seen, task, chosen)
+        answer = self._outcome(task)
         if self.seam.rules is None:
             return answer
         return withhold(answer, self.seam.rules)  # a model that can act reads no text

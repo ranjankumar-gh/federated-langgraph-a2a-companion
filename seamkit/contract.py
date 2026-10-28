@@ -8,7 +8,7 @@ reads declarations only: a partner whose behaviour changes under unchanged terms
 
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dc_field
 from datetime import date
 from pathlib import Path
@@ -81,6 +81,20 @@ class SkillTerms:
     # whether it reads the ceiling a caller sends before it spends
     usage: str = ""
     honours_budget: bool = False
+    # Chapter 19: the field names the skill reads (() states none), and where it
+    # processes and stores what it receives (() states none)
+    reads: tuple[str, ...] = ()
+    regions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EvidenceTerms:
+    """What one owner keeps for an auditor: how long, how fast it hands it over, and
+    whether it witnesses the other owner's log head ("daily" or "none")."""
+
+    retain_days: int
+    produce_within_days: int
+    witness: str
 
 
 @dataclass(frozen=True)
@@ -97,6 +111,8 @@ class SeamTerms:
     revocation_seconds: int | None = None
     # Chapter 17: "countersigned" if the partner signs its half of every seam receipt
     receipts: str = ""
+    # Chapter 19: what the partner keeps for an auditor; None states nothing
+    evidence: EvidenceTerms | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +161,9 @@ class Expectations:
     # Chapter 18: the seam's cost budget, the ceiling sent with every task and a line
     # per purpose; None for a seam nobody budgets
     budget: CostBudget | None = None
+    # Chapter 19: the evidence an auditor will ask this seam's partner for; None asks
+    # for nothing
+    evidence: EvidenceTerms | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +172,9 @@ class CrossingPolicy:
 
     classes: Mapping[str, str]  # field -> data class
     allowed: Mapping[str, frozenset[str]]  # owner -> classes that may cross to it
+    # Chapter 19: class -> the only regions its data may be processed in; a class
+    # not named may go to any region a partner declares
+    stays_in: Mapping[str, frozenset[str]] = dc_field(default_factory=dict)
 
 
 # A caller that names no policy lets nothing cross: the check fails closed.
@@ -201,6 +223,7 @@ def check(terms: SeamTerms, expects: Expectations,
     found += _canary(skill, expects)  # Chapter 15
     found += _receipts(terms, expects)  # Chapter 17
     found += _costs(skill, expects)  # Chapter 18
+    found += _evidence(skill, terms, expects, policy)  # Chapter 19
     return [_breach(terms, expects, d) for d in found]
 
 
@@ -332,6 +355,37 @@ def _costs(skill: SkillTerms, expects: Expectations) -> list[str]:
     return []
 
 
+def _evidence(skill: SkillTerms, terms: SeamTerms, expects: Expectations,
+              policy: CrossingPolicy) -> list[str]:
+    """What is sent must be declared, stay where it may, and be provable later."""
+    found = [f"does not declare reading {name}" for name in expects.sends
+             if skill.reads and name not in skill.reads]
+    for name in expects.sends:  # no regions declared is a gap for the auditor
+        kind = policy.classes.get(name, "unclassified")
+        home = policy.stays_in.get(kind, frozenset(skill.regions))
+        if not set(skill.regions) <= home:
+            found.append(f"would process {name} ({kind}) in {sorted(skill.regions)}, "
+                         f"not in {sorted(home)}")
+    return found + _kept(terms.evidence, expects.evidence)
+
+
+def _kept(have: EvidenceTerms | None, want: EvidenceTerms | None) -> list[str]:
+    if want is None:
+        return []
+    if have is None:
+        return ["states no evidence terms, and this seam expects them"]
+    found = []
+    if have.retain_days < want.retain_days:
+        found.append(f"keeps evidence {have.retain_days} days, fewer than the "
+                     f"{want.retain_days} expected")
+    if have.produce_within_days > want.produce_within_days:
+        found.append(f"produces it in {have.produce_within_days} days, slower than "
+                     f"the {want.produce_within_days} expected")
+    if want.witness == "daily" and have.witness != "daily":
+        found.append("does not witness the log head, and this seam expects it daily")
+    return found
+
+
 def violations(answer: Mapping[str, Any], shapes: Mapping[str, Field]) -> list[str]:
     """What in a completed task's artifact is not the shape the seam depends on."""
     return [f"{key} is {answer[key]!r}, not {want}"
@@ -393,6 +447,8 @@ def _plain(terms: SeamTerms) -> dict[str, Any]:
         plain["revocation_seconds"] = terms.revocation_seconds
     if terms.receipts:  # Chapter 17; absent from older revisions
         plain["receipts"] = terms.receipts
+    if terms.evidence:  # Chapter 19; absent from older revisions
+        plain["evidence"] = asdict(terms.evidence)
     return plain
 
 
@@ -416,7 +472,9 @@ def _skill(raw: Mapping[str, Any]) -> SkillTerms:
         int(raw["key_seconds"]) if raw.get("key_seconds") is not None else None,
         int(raw["compensate_seconds"]) if raw.get("compensate_seconds") is not None
         else None,
-        str(raw.get("usage", "")), bool(raw.get("honours_budget", False)))
+        str(raw.get("usage", "")), bool(raw.get("honours_budget", False)),
+        tuple(str(n) for n in raw.get("reads", [])),
+        tuple(str(r) for r in raw.get("regions", [])))
 
 
 def _terms(raw: Mapping[str, Any]) -> SeamTerms:
@@ -428,7 +486,8 @@ def _terms(raw: Mapping[str, Any]) -> SeamTerms:
         int(raw.get("skew_seconds", 0)),  # protobuf Struct numbers arrive as floats
         frozenset(str(c) for c in raw.get("accepts", [])),
         int(revocation) if revocation is not None else None,
-        str(raw.get("receipts", "")))
+        str(raw.get("receipts", "")),
+        _evidence_terms(raw["evidence"]) if "evidence" in raw else None)
 
 
 # In the caller's repository: one TOML file per seam.
@@ -462,7 +521,33 @@ def load_expectations(path: Path) -> Expectations:
         canary=_canary_policy(raw["canary"]) if "canary" in raw else None,
         receipts=str(raw.get("receipts", "ours")),
         slo=slo_of(raw["slo"]) if "slo" in raw else None,
-        budget=budget_of(raw["budget"]) if "budget" in raw else None)
+        budget=budget_of(raw["budget"]) if "budget" in raw else None,
+        evidence=_evidence_terms(raw["evidence"]) if "evidence" in raw else None)
+
+
+def _evidence_terms(raw: Mapping[str, Any]) -> EvidenceTerms:
+    witness = str(raw.get("witness", "none"))
+    if witness not in ("daily", "none"):
+        raise ValueError(f"witness {witness!r} is not daily or none")
+    return EvidenceTerms(int(raw["retain_days"]), int(raw["produce_within_days"]),
+                         witness)
+
+
+def revised(base: SeamTerms, path: Path) -> SeamTerms:
+    """The partner's next revision: its file names what changes from `base`.
+
+    The partner owns the file, one per revision. A skill table may change the fields
+    the skill reads and the regions it processes them in.
+    """
+    with path.open("rb") as fh:
+        raw = tomllib.load(fh)
+    changes = raw.get("skills", {})
+    skills = {sid: replace(
+        skill, reads=tuple(changes.get(sid, {}).get("reads", skill.reads)),
+        regions=tuple(changes.get(sid, {}).get("regions", skill.regions)))
+        for sid, skill in base.skills.items()}
+    return replace(base, revision=str(raw["revision"]), effective=raw["effective"],
+                   skills=skills, evidence=_evidence_terms(raw["evidence"]))
 
 
 def _policy(raw: Mapping[str, Any]) -> RetryPolicy:
@@ -518,6 +603,7 @@ def args_model(skill_id: str, skill: SkillTerms) -> type[BaseModel]:
     return model
 
 
-__all__ = ["EXTENSION_URI", "NO_CROSSING", "Breach", "CrossingPolicy", "Expectations",
-           "Field", "SeamTerms", "SkillTerms", "args_model", "check", "held_to",
-           "load_expectations", "publish", "seam_spec", "terms_of", "violations"]
+__all__ = ["EXTENSION_URI", "NO_CROSSING", "Breach", "CrossingPolicy", "EvidenceTerms",
+           "Expectations", "Field", "SeamTerms", "SkillTerms", "args_model", "check",
+           "held_to", "load_expectations", "publish", "revised", "seam_spec",
+           "terms_of", "violations"]

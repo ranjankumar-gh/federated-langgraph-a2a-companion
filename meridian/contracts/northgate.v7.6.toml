@@ -1,0 +1,16 @@
+# Northgate's terms, revision v7.6: what changes from v7.5. Northgate owns this file.
+revision = "v7.6"
+effective = 2027-07-01
+
+[evidence]  # what Northgate keeps for an auditor of its insurers' work
+retain_days = 2555  # seven years
+produce_within_days = 10
+witness = "daily"  # Northgate signs the head of each insurer's receipt log
+
+[skills.estimate_history]
+reads = ["claim_id"]  # the shop's whole book is no longer read for a claim
+regions = ["home"]
+
+[skills.estimate_repair]
+reads = ["claim_id", "damaged_parts"]
+regions = ["home"]

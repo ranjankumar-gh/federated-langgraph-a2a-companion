@@ -21,15 +21,18 @@ free-text remark never reaches the assistant. `filtered=False` deploys Chapter 7
 """
 
 import asyncio
+import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
+from pathlib import Path
 from typing import Any, TypedDict
 
 import httpx
 from a2a.server.context import ServerCallContext
 from a2a.types import AgentCard
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -43,11 +46,20 @@ from meridian.incident import ForwardingAuth
 from meridian.rates import RATES
 from seamkit.breaker import BreakerPolicy, SeamBreaker
 from seamkit.cards import card_digest
-from seamkit.contract import Field, SeamTerms, SkillTerms, publish
+from seamkit.contract import Field, SeamTerms, SkillTerms, publish, revised
 from seamkit.costs import Ceiling, Meter, RateCard, tokens
-from seamkit.delegation import DelegationAuth, Grant, Guard, as_peer, inbound_chain
+from seamkit.delegation import (
+    DelegationAuth,
+    Grant,
+    Guard,
+    as_peer,
+    chain_id,
+    inbound_chain,
+)
 from seamkit.errors import SeamError
+from seamkit.evidence import Opening, Witness, genuine, shut, signature, witness_head
 from seamkit.ingress import IngressRule
+from seamkit.receipt import Receipts, digest, nonce_for
 from seamkit.remote import CrossingRecord, connect
 from seamkit.revocation import RevocationSource, checked, checker
 from seamkit.server import (
@@ -91,6 +103,10 @@ RISK_TERMS_2027_04 = replace(
     RISK_TERMS_2027_02, revision="2027.04", effective=date(2027, 4, 5),
     skills={"screen_fraud": replace(RISK_TERMS_2027_02.skills["screen_fraud"],
                                     usage="reported", honours_budget=True)})
+# Chapter 19: release 2027.06 keeps a signed decision record for every screening and
+# signs the head of Claims' receipt log daily. Risk's file names the evidence terms.
+RISK_TERMS_2027_06 = revised(RISK_TERMS_2027_04, Path(__file__).parent / "contracts"
+                             / "risk.2027.06.toml")
 
 
 def risk_card(release: str, terms: SeamTerms = RISK_TERMS,
@@ -106,8 +122,47 @@ def risk_card(release: str, terms: SeamTerms = RISK_TERMS,
 RELEASED: tuple[tuple[str, SeamTerms], ...] = (
     ("2026.09", RISK_TERMS), ("2026.10", RISK_TERMS), ("2026.10", RISK_TERMS_0_1),
     ("2026.11", RISK_TERMS), ("2026.12", RISK_TERMS), ("2027.02", RISK_TERMS_2027_02),
-    ("2027.03", RISK_TERMS_2027_02), ("2027.04", RISK_TERMS_2027_04))
+    ("2027.03", RISK_TERMS_2027_02), ("2027.04", RISK_TERMS_2027_04),
+    ("2027.06", RISK_TERMS_2027_06))
 PUBLISHED_DIGESTS = frozenset(card_digest(risk_card(*release)) for release in RELEASED)
+
+
+@dataclass(frozen=True)
+class DecisionRecord:
+    """Why Risk scored one claim as it did: digests and names, never its values."""
+
+    chain_id: str  # the delegation chain the screening ran under
+    task_id: str
+    skill: str
+    release: str  # Risk's release, and so its code
+    behaviour: str  # how the score was made
+    basis: str  # what the screening was made from, as the reply to Claims says
+    score: float
+    inputs: Mapping[str, str]  # field name -> digest under Risk's nonce
+    signals: str  # one digest of the fraud signals, never the signals
+    onward: tuple[str, ...]  # digests of Risk's own estimate_history receipts
+    signer: str
+    sig: str = ""
+
+    def verifies(self, key: Ed25519PublicKey) -> bool:
+        return genuine(self, key)
+
+
+@dataclass
+class EvidenceStore:
+    """What Risk keeps for the evidence period, apart from any checkpoint: the signed
+    record, and the opening of each field, which only Risk can produce."""
+
+    records: dict[str, DecisionRecord] = field(default_factory=dict)  # by chain id
+    openings: dict[str, dict[str, Opening]] = field(default_factory=dict)
+
+    def keep(self, record: DecisionRecord, openings: dict[str, Opening]) -> None:
+        self.records[record.chain_id] = record
+        self.openings[record.chain_id] = openings
+
+    def erase(self, chain: str) -> None:
+        """A claimant's right to erasure: the values go, the signed digests stay."""
+        self.openings[chain] = {}  # a tombstone: the record kept, nothing to open
 
 
 class RiskScreenState(TypedDict, total=False):
@@ -212,7 +267,8 @@ def screen(state: RiskScreenState) -> RiskScreenState:
 def build_risk_graph(checkpointer: InMemorySaver,
                      lookups: asyncio.Event | None = None,
                      consult: Any = None,
-                     model: ScreeningModel | None = None) -> Any:
+                     model: ScreeningModel | None = None,
+                     keep: Any = None) -> Any:
     async def look_up_police_report(state: RiskScreenState) -> RiskScreenState:
         if float(state["claim"]["amount"]) <= POLICE_REPORT_OVER:
             return {}
@@ -238,7 +294,12 @@ def build_risk_graph(checkpointer: InMemorySaver,
     else:
         graph.add_edge(START, first.__name__)
     graph.add_edge(first.__name__, "screen")
-    graph.add_edge("screen", END)
+    if keep is not None:  # release 2027.06: the record is written before Risk answers
+        graph.add_node("keep_record", keep)
+        graph.add_edge("screen", "keep_record")
+        graph.add_edge("keep_record", END)
+    else:
+        graph.add_edge("screen", END)
     return graph.compile(checkpointer=checkpointer)
 
 
@@ -276,6 +337,11 @@ class RiskPartner:
     # alone), and whether Risk signs a usage report into every task it answers
     model: ScreeningModel | None = None
     meters: bool = False
+    # Chapter 19: the receipts Risk cuts on its own calls to Northgate (None: none),
+    # the secret its decision records' nonces derive from, and where it keeps them
+    onward: Receipts | None = None
+    secret: bytes = field(default_factory=lambda: os.urandom(32))
+    evidence: EvidenceStore = field(default_factory=EvidenceStore)
 
     def __post_init__(self) -> None:
         sources = (revocation_sources() if self.revocations is None
@@ -286,8 +352,9 @@ class RiskPartner:
                       else None)
         if self.model is not None:
             self.model.meter = self.meter
+        keeps = self._keep if self.terms.evidence is not None else None
         self.graph = build_risk_graph(self.checkpointer, self.lookups, consult,
-                                      self.model)
+                                      self.model, keeps)
         self.executor = GraphExecutor(
             self.graph, "fraud_screening",
             to_input=lambda claim: {"claim": claim},
@@ -312,9 +379,42 @@ class RiskPartner:
             "fraud_score": out["fraud_score"] / (100.0 if self.rescaled else 1.0)}
         outputs = {f.name for f in self.terms.skills["screen_fraud"].outputs}
         if "basis" in outputs:  # 2027.02: a screening says what it was made from
-            missed = any("error" in seen for seen in out.get("history_seen", []))
-            answer["basis"] = BASIS_DEGRADED if missed else BASIS_FULL
+            answer["basis"] = self._basis(out)
         return answer
+
+    @staticmethod
+    def _basis(out: Mapping[str, Any]) -> str:
+        missed = any("error" in seen for seen in out.get("history_seen", []))
+        return BASIS_DEGRADED if missed else BASIS_FULL
+
+    def _keep(self, state: RiskScreenState, config: RunnableConfig) -> RiskScreenState:
+        """Release 2027.06: sign why this screening came out as it did, and keep it."""
+        run = config["configurable"]
+        task, claim = str(run["task_id"]), state["claim"]
+        nonce = nonce_for(self.secret, task)  # derived, so it is never stored apart
+        chain = chain_id(run["delegation"]) if "delegation" in run else ""
+        onward = tuple(r.digest for r in self.onward.log.receipts()
+                       if r.thread == run["thread_id"]) if self.onward else ()
+        unsigned = DecisionRecord(
+            chain, task, "screen_fraud", self.release,
+            "self-check" if self.model and self.model.self_check else "single pass",
+            self._basis(state), state["fraud_score"], shut(claim, nonce),
+            digest({"signals": state["fraud_signals"]}, nonce), onward, "risk")
+        self.evidence.keep(replace(unsigned, sig=signature(unsigned, KEYS["risk"])),
+                           {k: Opening(k, v, nonce) for k, v in claim.items()})
+        return {}
+
+    def witness(self, seam: str, head: str, count: int) -> Witness | None:
+        """Sign the head of Claims' receipt log, if Risk's terms promise to."""
+        promised = self.terms.evidence
+        if promised is None or promised.witness != "daily":
+            return None
+        return witness_head(KEYS["risk"], "risk", seam, head, count, self.now())
+
+    def prune(self, context_id: str) -> None:
+        """Risk prunes a closed task's thread 30 days after it closed; the evidence
+        store is not the thread."""
+        self.checkpointer.delete_thread(context_id)
 
     def _configure(self, call: ServerCallContext) -> dict[str, Any]:
         if self.forwards:  # what the incident's client reads and sends on
@@ -344,7 +444,9 @@ class RiskPartner:
                                            log=self.records.append,
                                            rules=HISTORY_RULES,
                                            filtered=self.filtered,
-                                           breaker=self.history_breaker)
+                                           breaker=self.history_breaker,
+                                           receipts=self.onward,
+                                           authority=lambda: chain_id(inbound_chain()))
         return self._tool
 
     async def _consult_northgate(self, state: RiskScreenState) -> RiskScreenState:

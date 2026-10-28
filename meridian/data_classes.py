@@ -28,4 +28,14 @@ CROSSES_TO: dict[str, frozenset[str]] = {
     "Finance": frozenset({"claim", "estimate", "policy"}),
 }
 
-MERIDIAN_POLICY = CrossingPolicy(DATA_CLASSES, CROSSES_TO)
+# Chapter 19: where a class may be processed. Claim history and the fraud view are
+# Meridian's own: a partner that holds them holds them at home. A class not named here
+# may be processed in any region the partner declares.
+STAYS_IN: dict[str, frozenset[str]] = {
+    "claim_history": frozenset({"home"}), "fraud_assessment": frozenset({"home"})}
+# A stricter reading, which a legal review may impose: the car's data stays home too.
+STAYS_IN_STRICT: dict[str, frozenset[str]] = {**STAYS_IN,
+                                              "vehicle": frozenset({"home"})}
+
+MERIDIAN_POLICY = CrossingPolicy(DATA_CLASSES, CROSSES_TO, STAYS_IN)
+STRICT_POLICY = CrossingPolicy(DATA_CLASSES, CROSSES_TO, STAYS_IN_STRICT)

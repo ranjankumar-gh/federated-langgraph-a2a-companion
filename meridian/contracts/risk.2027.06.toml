@@ -1,0 +1,12 @@
+# Risk's terms, revision 2027.06: what changes from 2027.04. Risk owns this file.
+revision = "2027.06"
+effective = 2027-06-01
+
+[evidence]  # Risk keeps a signed decision record for every screening
+retain_days = 2555  # seven years
+produce_within_days = 5
+witness = "daily"  # Risk signs the head of Claims' receipt log
+
+[skills.screen_fraud]
+reads = ["claim_id", "amount", "days_to_report", "prior_claims"]
+regions = ["home"]

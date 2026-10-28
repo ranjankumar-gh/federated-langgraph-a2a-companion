@@ -25,7 +25,8 @@ from seamkit.reconcile import Finding
 from seamkit.slo import Budget
 
 KINDS = ("breaker", "stop", "drift", "reconcile", "residue", "push", "receipt", "slo",
-         "cost")  # Chapter 18: a usage report over its ceiling, or a line past alert
+         "cost",  # Chapter 18: a usage report over its ceiling, or a line past alert
+         "evidence")  # Chapter 19: a question an auditor's pack cannot answer
 SIDES = ("caller", "callee")  # any other route is a named queue
 
 # A finding's verdict, as Chapters 12, 13 and 15 write it, and the kind it signals.

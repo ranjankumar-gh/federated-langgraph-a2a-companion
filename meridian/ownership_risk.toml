@@ -14,6 +14,7 @@ push = ["caller"]
 receipt = ["caller", "callee"]
 slo = ["caller", "callee"]
 cost = ["caller", "callee"]
+evidence = ["caller", "callee"]  # Chapter 19: a gap in the pack is both owners' to hear
 
 [seams.estimate_history]  # the peer seam: Risk calls Northgate
 callee = "Northgate"

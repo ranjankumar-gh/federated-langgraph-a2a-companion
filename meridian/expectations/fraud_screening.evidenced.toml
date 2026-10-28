@@ -1,0 +1,25 @@
+# What Claims depends on from Risk's screen_fraud once an auditor may ask for the
+# evidence behind a referral (Chapter 19). Claims owns this file. The earlier chapters'
+# federations keep fraud_screening.toml and fraud_screening.costed.toml.
+seam = "fraud_screening"
+owner = "Risk"
+skill = "screen_fraud"
+protocols = ["1.0"]  # Chapter 15: newest first; a card offering none is a breach
+sends = ["claim_id", "amount", "days_to_report", "prior_claims"]
+answers = ["police_report"]  # a Claims adjuster answers it
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+slo_seconds = 10.0
+delivery = "stream"  # a blocking send: one answer, seconds long
+lookup = true  # Risk honours no key: look it up before a send, in case one left
+notice_days = 21  # Chapter 15: a breaking revision is on the card 3 weeks ahead
+
+[evidence]  # Chapter 19: what Claims needs Risk to keep, for what an auditor asks
+retain_days = 2555  # seven years, the longest a claim is contested
+produce_within_days = 14  # the regulator's deadline for a pack
+witness = "daily"  # Risk signs the head of Claims' receipt log every day
+
+[reads.fraud_score]
+into = "fraud_score"
+type = "number"
+bounds = [0, 100]  # the referral threshold of 70 is written on this scale

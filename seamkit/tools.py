@@ -32,6 +32,7 @@ from seamkit.remote import (
     SeamSpec,
     log_crossing,
 )
+from seamkit.receipt import Receipts
 from seamkit.retry import onward_key
 
 
@@ -39,7 +40,9 @@ def remote_skill_tool(partner: PartnerConnection, skill_id: str, owner: str,
                       log: Callable[[CrossingRecord], None] = log_crossing,
                       rules: Mapping[str, IngressRule] | None = None,
                       filtered: bool = True,
-                      breaker: SeamBreaker | None = None) -> StructuredTool:
+                      breaker: SeamBreaker | None = None,
+                      receipts: Receipts | None = None,
+                      authority: Callable[[], str] = lambda: "") -> StructuredTool:
     """`rules` are the caller's (Chapter 8); without them every output the partner
     promises gets the rule its type gives it, so every string is text and withheld.
     `breaker` is the caller's own on this skill (Chapter 14): while it is open, the
@@ -57,7 +60,8 @@ def remote_skill_tool(partner: PartnerConnection, skill_id: str, owner: str,
     seam = SeamSpec(skill_id, owner, skill_id, tuple(args.model_fields),
                     receives={name: name for name in outputs}, shapes=outputs,
                     rules=held)
-    node = RemoteAgentNode(seam, partner, log, breaker=breaker)
+    node = RemoteAgentNode(seam, partner, log, authority, breaker=breaker,
+                           receipts=receipts)
 
     async def call(**kwargs: Any) -> dict[str, Any]:
         # Chapter 12: inside a partner's run, the key is derived from the key of the
