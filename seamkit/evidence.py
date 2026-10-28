@@ -30,6 +30,7 @@ from seamkit.approval import Approval, encode_approval, refuse_approval
 from seamkit.canary import Baseline, Verdict
 from seamkit.contract import CrossingPolicy, EvidenceTerms, SeamTerms
 from seamkit.costs import CostEntry, CostLedger
+from seamkit.drill import Clock
 from seamkit.inventory import SeamInventory
 from seamkit.ownership import Signal
 from seamkit.receipt import ReceiptLog, SeamReceipt, digest
@@ -252,7 +253,7 @@ class AuditPolicy:
 
 
 def gaps(packs: Sequence[EvidencePack], pinned: Mapping[str, Ed25519PublicKey],
-         policy: AuditPolicy, clock: Any) -> list[Gap]:
+         policy: AuditPolicy, clock: Clock) -> list[Gap]:
     """What the packs leave unanswered: signatures, openings, logs, regions, age."""
     found = [g for pack in packs for g in _forged(pack, pinned)]
     for chain in join(packs):
@@ -350,12 +351,13 @@ def _aged(receipt: SeamReceipt, held: Held | None, policy: AuditPolicy,
 def _opened(chain: EvidencePack) -> list[Gap]:
     """Each opening against the digest its owner signed. An erased value is a gap."""
     record, found = chain.decision.get("record"), []
+    owner = record.signer if record else chain.owner
     for o in chain.openings:
         closed = record.inputs.get(o.field) if record else None
         if o.value is None:
-            found.append(Gap(ON_WHAT, "risk", f"{o.field} erased"))
+            found.append(Gap(ON_WHAT, owner, f"{o.field} erased"))
         elif closed is None or not o.opens(closed):
-            found.append(Gap(ON_WHAT, "risk", f"{o.field} does not open its digest"))
+            found.append(Gap(ON_WHAT, owner, f"{o.field} does not open its digest"))
     return found
 
 
