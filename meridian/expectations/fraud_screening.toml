@@ -8,6 +8,7 @@ auth = ["mtls", "delegation"]
 skew_seconds = 30
 slo_seconds = 10.0
 delivery = "stream"  # a blocking send: one answer, seconds long
+lookup = true  # Risk honours no key: look it up before a send, in case one left
 
 [reads.fraud_score]
 into = "fraud_score"

@@ -30,8 +30,9 @@ async def test_clean_claim_settles_over_a2a() -> None:
     assert out["payment_ref"] == "PAY-CLM-1001-3000"
     assert sorted(out["ledger"]) == ["fraud_screening", "payments",
                                            "repair_estimate"]
-    assert [r.seam for r in fed.records] == ["fraud_screening", "repair_estimate",
-                                             "payments"]  # one record per crossing
+    assert [(r.seam, r.call) for r in fed.records] == [  # one record per crossing
+        ("fraud_screening", "list"),  # Chapter 12: Risk honours no key, so look first
+        ("fraud_screening", "send"), ("repair_estimate", "send"), ("payments", "send")]
 
 
 async def test_each_seam_sends_only_the_fields_it_names() -> None:

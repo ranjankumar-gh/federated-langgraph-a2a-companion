@@ -95,7 +95,14 @@ NORTHGATE_V8 = replace(
     skills={**NORTHGATE_V7.skills, "estimate_repair": replace(
         ESTIMATE_REPAIR_NOTES,
         inputs=(*ESTIMATE_REPAIR.inputs, Field("vin", "string")))})
-TERMS = {"v7": NORTHGATE_V7_2, "v8": NORTHGATE_V8}  # the revision each release runs
+# Chapter 12: a dated revision promises a key window on both skills. A repeat of a key
+# inside an hour gets the task the first send opened; Northgate bills each task.
+NORTHGATE_V7_3 = replace(
+    NORTHGATE_V7_2, revision="v7.3", effective=date(2026, 12, 21),
+    skills={"estimate_repair": replace(ESTIMATE_REPAIR_NOTES, key_seconds=3600),
+            "estimate_history": replace(ESTIMATE_HISTORY, key_seconds=3600)})
+TERMS = {"v7": NORTHGATE_V7_2, "v7.3": NORTHGATE_V7_3,
+         "v8": NORTHGATE_V8}  # the revision each release runs
 
 # What each repairing shop typed into its estimate form, by claim. Northgate passes the
 # notes through as they were written; it did not write them.
@@ -404,7 +411,7 @@ class NorthgatePartner:
         inner = a2a_app(self.card, self.executor, [
             key_set_route(KEY_SET_PATH,
                           {NORTHGATE_KID: NORTHGATE_SIGNING_KEY.public_key()})],
-            push=push_sender(self.push) if self.push else None)
+            push=push_sender(self.push) if self.push else None, now=self.now)
         self.guard = Guard(inner, "northgate", TRUSTS, now=self.now,
                            revoked=checker(sources) if sources else None)
         front: ASGIApp = self.guard if self.verifies_chains else TokenCheck(inner)

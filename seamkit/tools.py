@@ -21,6 +21,7 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 
 from seamkit.contract import args_model
+from seamkit.delegation import run_value
 from seamkit.errors import CardUntrusted, ContractBreach
 from seamkit.ingress import IngressRule, rule_for
 from seamkit.remote import (
@@ -30,6 +31,7 @@ from seamkit.remote import (
     SeamSpec,
     log_crossing,
 )
+from seamkit.retry import onward_key
 
 
 def remote_skill_tool(partner: PartnerConnection, skill_id: str, owner: str,
@@ -54,7 +56,11 @@ def remote_skill_tool(partner: PartnerConnection, skill_id: str, owner: str,
     node = RemoteAgentNode(seam, partner, log)
 
     async def call(**kwargs: Any) -> dict[str, Any]:
-        return await node.call_once(kwargs)  # no thread to link: one task per call
+        # Chapter 12: inside a partner's run, the key is derived from the key of the
+        # message the run is answering, so a run made twice asks the same question
+        inbound = run_value("inbound_key")
+        key = onward_key(str(inbound), skill_id) if inbound else None
+        return await node.call_once(kwargs, key)  # no thread to link: no ledger
 
     return StructuredTool.from_function(coroutine=call, name=skill.id,
                                         description=skill.description, args_schema=args)

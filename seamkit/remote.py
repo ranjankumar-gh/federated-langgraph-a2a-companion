@@ -20,24 +20,35 @@ check and the field map (seamkit.ingress): a closed value is admitted, free text
 cleaned, capped and admitted as text, and the tool shape hands a model values only. A
 partner's question and a refusal reason are cleaned and capped before a person or a
 log sees them.
+
+Since Chapter 12, a send whose answer was lost is sent again under the same key, but
+only while the partner's terms honour that key and the seam's retry policy allows it.
+Otherwise the node looks the key up in the partner's task list, and adopts the task it
+finds; it never sends under a key nobody honours. A seam whose partner honours no key
+can look its key up before every first send (`lookup`), which closes the crash window
+between a send and the checkpoint that records it.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any
 
 import httpx
 from a2a.client import A2ACardResolver, Client, ClientCallContext, ClientConfig
 from a2a.client import A2AClientError, ClientFactory
 from a2a.helpers import get_data_parts, new_data_message
-from a2a.types import AgentCard, GetTaskRequest, Role, SendMessageConfiguration
+from a2a.types import AgentCard, GetTaskRequest, ListTasksRequest, Role
+from a2a.types import SendMessageConfiguration
 from a2a.types import SendMessageRequest, Task, TaskPushNotificationConfig, TaskState
 from a2a.utils.errors import A2AError
 from langgraph.types import interrupt
 
+import seamkit.ledger
 from seamkit.cards import card_digest
 from seamkit.contract import (
     NO_CROSSING,
@@ -83,6 +94,7 @@ from seamkit.ledger import (
     question_digest,
     unanswered,
 )
+from seamkit.retry import NO_RETRY, RetryPolicy, refuse_retry, retrying
 from seamkit.trust import (
     Gradient,
     PartnerTrust,
@@ -130,6 +142,10 @@ class SeamSpec:
     # keeps Chapter 3's rule: whoever runs the thread answers what the seam answers.
     roles: tuple[str, ...] = ()
     wait_seconds: float | None = None  # how long Claims waits on a partner's people
+    # Chapter 12: how calls on this seam are retried, and whether a first send looks
+    # its key up first (a partner that honours no key)
+    retry: RetryPolicy = NO_RETRY
+    lookup: bool = False
 
 
 @dataclass(frozen=True)
@@ -317,19 +333,24 @@ class RemoteAgentNode:
     # Chapter 11: the push config a new task is sent with (seamkit.push.PushTo).
     push: Callable[[str, str | None], TaskPushNotificationConfig | None] = field(
         default=no_push)
+    # Chapter 12: how a retry waits; a test replaces it with one that moves a clock
+    sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
 
     async def __call__(self, state: Mapping[str, Any]) -> dict[str, Any]:
         name = self.seam.name
         entry = state.get("ledger", {}).get(name)
         if entry is None:  # the intent and its key are checkpointed before any send
             return {"ledger": {name: self.intend()}}
-        if entry["state"] == "unknown":  # sent once, answer lost: never send it again
-            raise PartnerUnavailable(name, "sent, outcome unknown", entry["task_id"])
-        if not entry["task_id"]:
+        sending = {k: state[k] for k in self.seam.sends}
+        if entry["state"] == "unknown":  # sent, answer lost: the same key, or a lookup
+            task = await self.recover(sending, entry)
+        elif not entry["task_id"]:
             try:  # one superstep later: send under the key the checkpoint holds
-                task = await self._send({k: state[k] for k in self.seam.sends}, entry,
-                                        key=entry["idempotency_key"])
-            except PartnerUnavailable:  # record the attempt, then stop on re-entry
+                looks = self.seam.lookup and not self.held_back()
+                found = await self.lookup(entry) if looks else None
+                task = found or await self._send(sending, entry,
+                                                 key=entry["idempotency_key"])
+            except PartnerUnavailable:  # record the attempt; re-entry recovers it
                 return {"ledger": {name: unanswered(entry)}}
         else:  # a task exists: read it, never send a second one
             task = await self._get(entry["task_id"])
@@ -345,6 +366,71 @@ class RemoteAgentNode:
             return {"ledger": {name: seen}}
         return self._outcome(task)  # unchanged and unfinished: raises, task recorded
 
+    async def recover(self, sending: Mapping[str, Any], entry: LedgerEntry) -> Task:
+        """An entry left unknown: resend under its key, or find the task it opened."""
+        lost = PartnerUnavailable(self.seam.name, "sent, outcome unknown")
+        honoured, skew = self.key_terms()
+        first, clock = sent_at(entry, self.seam.timeout), seamkit.ledger.CLOCK
+        why = refuse_retry(self.seam.retry, "send", lost, 1, honoured, skew, first,
+                           clock())
+        if not why:  # the partner answers a repeat with the task the first send opened
+            return await retrying(
+                lambda: self._send(sending, entry, key=entry["idempotency_key"]),
+                "send", self.seam.retry, honoured, skew, first, clock, made=1,
+                sleep=self.sleep)
+        try:  # a key nobody honours, or a window spent: look, and never send again
+            if task := await self.lookup(entry):
+                return task
+        except PartnerUnavailable:
+            pass
+        raise PartnerUnavailable(self.seam.name, f"sent, outcome unknown: {why}",
+                                 entry["task_id"])
+
+    def held_back(self) -> bool:
+        """The send would be refused before it left: no lookup goes first, either."""
+        return bool(self.partner.refuses(self.seam.skill) or self.partner.breaches)
+
+    def key_terms(self) -> tuple[int | None, int]:
+        """The key window the partner's terms in force state for the skill, and skew."""
+        if not self.partner.terms:
+            return None, 0
+        held = self.partner.terms[0]
+        skill = held.skills.get(self.seam.skill)
+        return (skill.key_seconds if skill else None), held.skew_seconds
+
+    async def lookup(self, entry: LedgerEntry) -> Task | None:
+        """The task this entry's key opened, found in the partner's list, or None.
+
+        It matches the key against each task's first message, which works only on a
+        partner that keeps the first message in a task's history; the specification
+        leaves that to the agent. A list can skip a task, so None proves nothing.
+        """
+        for task in await self.tasks():
+            if task.history and task.history[0].message_id == entry["idempotency_key"]:
+                return await self._get(task.id)  # the list carries no artifacts
+        return None
+
+    async def tasks(self) -> list[Task]:
+        """Every task the partner lists for this caller, page by page: one record."""
+        found: list[Task] = []
+        record, token = self._record("list", ()), ""
+        try:
+            while True:
+                page = await self.partner.client.list_tasks(
+                    ListTasksRequest(page_size=50, page_token=token),
+                    context=ClientCallContext(timeout=self.seam.timeout))
+                found += page.tasks
+                if not (token := page.next_page_token):
+                    break
+        except DelegationRefused as exc:
+            self.log(record(error=type(exc).__name__))
+            raise
+        except (A2AClientError, A2AError) as exc:
+            self.log(record(error=type(exc).__name__))
+            raise PartnerUnavailable(self.seam.name, str(exc)) from exc
+        self.log(record(state=f"{len(found)} tasks"))
+        return found
+
     def intend(self) -> LedgerEntry:
         """The first version of this seam's entry: nothing sent yet, a key minted."""
         return {**intended(self.seam.name, self.seam.skill,
@@ -352,13 +438,15 @@ class RemoteAgentNode:
                            self.partner.release),
                 "terms": terms_digest(self.partner, self.seam.skill)}
 
-    async def call_once(self, data: Mapping[str, Any]) -> dict[str, Any]:
+    async def call_once(self, data: Mapping[str, Any],
+                        key: str | None = None) -> dict[str, Any]:
         """One task and no ledger entry: the tool call shape (seamkit.tools).
 
         An argument the model left unset does not cross: only what it chose is sent.
+        `key` is the message id, when the caller derives one (Chapter 12).
         """
         chosen = {k: v for k, v in data.items() if v is not None}
-        answer = self._outcome(await self._send(chosen))
+        answer = self._outcome(await self._send(chosen, key=key))
         if self.seam.rules is None:
             return answer
         return withhold(answer, self.seam.rules)  # a model that can act reads no text
@@ -488,6 +576,12 @@ class RemoteAgentNode:
                                   call, sent, idempotency_key=key, **result)
 
         return finish
+
+
+def sent_at(entry: LedgerEntry, timeout: float) -> float:
+    """The earliest the first send can have left: an unknown entry is stamped after the
+    send's timeout ran out, so the deadline is counted from before it."""
+    return datetime.fromisoformat(entry["seen_at"]).timestamp() - timeout
 
 
 @dataclass

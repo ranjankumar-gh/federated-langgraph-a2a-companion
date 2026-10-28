@@ -9,7 +9,14 @@ approver at Claims and one at Finance, two different people. The graph asks each
 `ask`, which names who must answer; the executor keeps Finance's own question inside,
 and Finance's inbox answers it. `addressed=False` deploys 2026.12 as it first shipped,
 with two bare interrupt() calls behind Chapter 3's executor: the opening incident.
+
+Release 2026.14 (Chapter 12) states a key window on pay_claim: for 24 hours, a send that
+repeats a key gets the task the first send opened. The key index is kept across releases
+with the task store, and a restore from backup takes both back; the `paid` log, which
+stands for money that left Finance's bank, never goes back.
 """
+
+import copy
 
 import time
 from collections.abc import Callable, Mapping
@@ -19,6 +26,7 @@ from typing import Any, TypedDict, cast
 
 import httpx
 
+from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.runnables import RunnableConfig
@@ -35,7 +43,15 @@ from seamkit.delegation import Guard, Verified, chain_id
 from seamkit.errors import SeamError
 from seamkit.ledger import question_digest
 from seamkit.revocation import RevocationSource, checker, still_holds
-from seamkit.server import GraphExecutor, a2a_app, agent_card, ask, push_sender
+from seamkit.server import (
+    GraphExecutor,
+    Keys,
+    Waiting,
+    a2a_app,
+    agent_card,
+    ask,
+    push_sender,
+)
 
 FINANCE_URL = "http://finance.meridian.test/"
 
@@ -66,11 +82,24 @@ FINANCE_TERMS_2026_13 = replace(
     FINANCE_TERMS_2026_12, revision="2026.13", effective=date(2026, 12, 14),
     skills={"pay_claim": replace(FINANCE_TERMS_2026_12.skills["pay_claim"],
                                  wait_seconds=24 * 3600)})
+# Chapter 12: a repeat of a key inside 24 hours gets the task the first send opened.
+FINANCE_TERMS_2026_14 = replace(
+    FINANCE_TERMS_2026_13, revision="2026.14", effective=date(2027, 1, 11),
+    skills={"pay_claim": replace(FINANCE_TERMS_2026_13.skills["pay_claim"],
+                                 key_seconds=24 * 3600)})
 TERMS = {"2026.10": FINANCE_TERMS, "2026.11": FINANCE_TERMS_2026_11,
          "2026.12": FINANCE_TERMS_2026_12, "2026.12.1": FINANCE_TERMS_2026_12_1,
-         "2026.13": FINANCE_TERMS_2026_13}
-TWO_PARTY = frozenset({"2026.12", "2026.12.1", "2026.13"})
+         "2026.13": FINANCE_TERMS_2026_13, "2026.14": FINANCE_TERMS_2026_14}
+TWO_PARTY = frozenset({"2026.12", "2026.12.1", "2026.13", "2026.14"})
 TWO_PARTY_OVER = 2_500.0
+
+
+@dataclass(frozen=True)
+class Backup:
+    tasks: dict[str, Any]
+    keys: dict[Any, Any]
+    checkpoints: Any
+    waiting: dict[str, Waiting]
 
 
 class ApprovalRefused(SeamError):
@@ -140,6 +169,7 @@ class FinancePartner:
         # The guard's task bindings outlive any one release's app.
         self.bound: dict[str, tuple[str, str]] = {}
         self.holders: dict[str, str] = {}
+        self.keys: Keys = {}  # Chapter 12: the key index, kept like the task store
         self.ship(self.release)
 
     def ship(self, release: str) -> None:
@@ -147,11 +177,38 @@ class FinancePartner:
         and the guard keeps the tasks it has bound to a person and a claim."""
         self.release, self.card = release, finance_card(release)
         inner = a2a_app(self.card, self.executor, store=self.executor.store,
-                        push=self.pushing)
+                        push=self.pushing, keys=self.keys, now=self.now)
         self.guard = Guard(inner, "finance", MERIDIAN_TRUSTS, now=self.now,
                            revoked=checker(self.sources), tasks=self.bound,
                            holders=self.holders)
         self.app: ASGIApp = self.guard
+
+    def backup(self) -> "Backup":
+        """Last night's backup: the task store, the key index, and the graph's state."""
+        saver = self.checkpointer
+        return Backup(copy.deepcopy(self._held_tasks()), dict(self.keys),
+                      copy.deepcopy((saver.storage, saver.writes, saver.blobs)),
+                      dict(self.executor.waiting))
+
+    def restore(self, backup: "Backup") -> None:
+        """Restore from backup. The records go back; payments already made do not."""
+        held = self._held_tasks()
+        held.clear()
+        held.update(copy.deepcopy(backup.tasks))
+        self.keys.clear()
+        self.keys.update(backup.keys)
+        saver = self.checkpointer
+        stores: tuple[dict[Any, Any], ...] = (saver.storage, saver.writes, saver.blobs)
+        for live, kept in zip(stores, copy.deepcopy(backup.checkpoints), strict=True):
+            live.clear()
+            live.update(kept)
+        self.executor.waiting = dict(backup.waiting)
+
+    def _held_tasks(self) -> dict[str, Any]:
+        """The in-memory store's own dict: what a database restore would put back."""
+        store = cast(InMemoryTaskStore, self.executor.store)
+        tasks = cast(dict[str, Any], store._impl.tasks)  # the SDK keeps no handle
+        return tasks
 
     def _paid(self, out: dict[str, Any]) -> dict[str, Any]:
         self.paid.append({"claim_id": out["claim"]["claim_id"],

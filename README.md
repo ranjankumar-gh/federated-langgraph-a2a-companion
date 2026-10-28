@@ -228,6 +228,33 @@ Run only this chapter's tests with `uv run pytest tests/test_ch10_resume.py`.
 
 Run only this chapter's tests with `uv run pytest tests/test_ch11_delivery.py`.
 
+### Chapter 12: Retries, Idempotency, and Reconciliation
+
+- `seamkit/server.py`: `KeyedHandler`, the partner's half of a key. A repeat of a key from the
+  same caller inside the skill's window gets the task the first send opened; a repeat with a
+  different request is refused; a concurrent repeat waits for the first. `a2a_app` reads the
+  windows from the card's terms (`SkillTerms.key_seconds`) and takes the key index (`keys=`).
+- `seamkit/retry.py`: `RetryPolicy`, `refuse_retry` (reads retry on an outage; sends only under
+  an honoured key, inside the deadline and the window less the skew), `backoff` (full jitter,
+  `Retry-After`), `retrying`, and `onward_key`.
+- `seamkit/contract.py`: `SkillTerms.key_seconds`; `Expectations.retry` and `lookup`; `check`'s
+  ninth rule. `meridian/expectations/payments.toml` gains `[retry]`, and
+  `fraud_screening.toml` gains `lookup = true`.
+- `seamkit/remote.py`: `RemoteAgentNode.recover` (an `unknown` entry is resent under its key,
+  or looked up), `lookup`, `tasks`, and the pre-send lookup. `call_once` takes a key, and
+  `seamkit/tools.py` derives it from the inbound message id.
+- `seamkit/delegation.py`: `verify` refuses a chain that comes back to an owner.
+- `seamkit/reconcile.py`: `Reconciler`, its inward and outward passes, `Finding`, `ACTIONS`.
+- `meridian/finance_server.py`: release 2026.14 (a 24-hour key window), `backup` and
+  `restore`. `northgate/server.py`: terms v7.3 (an hour on both skills).
+  `meridian/identity.py`: the reconciliation job's session. `meridian/incident.py`:
+  `ResendOnUnknown`, the opening incident's node.
+- `tests/test_ch12_retries.py`: the incident, both halves of the key, the retry policy,
+  LangGraph's node retry, onward keys, the loop rule, the crash window, found and absent tasks,
+  an orphan, and a restore from backup.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch12_retries.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

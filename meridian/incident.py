@@ -29,6 +29,11 @@ Chapter 11's incident is letter_receiver below: the push receiver a webhook exam
 suggests. It checks one token for the whole seam, records the pushed state in the
 ledger through `observe`, and wakes the thread. The body becomes state, so whoever holds
 the token writes the ledger. The doorbell receiver (seamkit.push) is the fix.
+
+Chapter 12's incident is ResendOnUnknown below: Chapter 9's never-resend rule replaced by
+three resends under the entry's key, on a Finance that does nothing with a key. The
+partner's half of the key (seamkit.server.KeyedHandler), the seam retry policy
+(seamkit.retry), and the reconciliation job (seamkit.reconcile) are the fix.
 """
 
 import json
@@ -48,11 +53,12 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from meridian.identity import MeridianIssuer
+from meridian.resume import ResumeGate
 from meridian.inprocess import ClaimState, Node
 from seamkit.delegation import as_peer, run_value
-from seamkit.errors import StaleLedgerWrite
+from seamkit.errors import PartnerUnavailable, StaleLedgerWrite
 from seamkit.ingress import derive
-from seamkit.ledger import observe
+from seamkit.ledger import LedgerEntry, observe
 from seamkit.push import TOKEN_HEADER
 from seamkit.resume import wake
 from seamkit.remote import PartnerConnection, RemoteAgentNode, connect, question_of
@@ -233,3 +239,20 @@ def letter_receiver(token: str, graph: Any, configs: Callable[[str], RunnableCon
         return JSONResponse({"verdict": "recorded", "woken": woken})
 
     return Starlette(routes=[Route("/push/{thread}/{seam}", receive, methods=["POST"])])
+
+
+class ResendOnUnknown(ResumeGate):
+    """Chapter 12's incident: an unknown entry resent under its own key, three times.
+
+    Every part of the caller's half is right. The key is real, unique, and reused. What
+    is missing is the partner's half: nothing asked whether the partner honours the key,
+    and a partner that does not opens a second task for the same payment.
+    """
+
+    async def recover(self, sending: Mapping[str, Any], entry: LedgerEntry) -> Task:
+        for attempt in range(3):
+            try:
+                return await self._send(sending, entry, key=entry["idempotency_key"])
+            except PartnerUnavailable:
+                await self.sleep(2.0 ** attempt)
+        raise PartnerUnavailable(self.seam.name, "sent, outcome unknown")

@@ -266,6 +266,8 @@ def verify(chain: Chain, peer: str, me: str, trusts: Mapping[str, Trust],
                                     f"held by {last.issuer}")
     if last.audience != me:
         raise DelegationRefused(me, f"addressed to {last.audience}")
+    if me in {link.issuer for link in chain}:  # Chapter 12: a chain may not come back
+        raise DelegationRefused(me, f"a loop: {me} already passed this chain on")
     trust = trusts.get(chain[0].issuer)
     if trust is None or chain[0].parent:
         raise DelegationRefused(me, f"root {chain[0].issuer} is not pinned")

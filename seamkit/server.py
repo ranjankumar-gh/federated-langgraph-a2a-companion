@@ -14,9 +14,19 @@ A partner that verifies delegation chains puts a Guard (seamkit.delegation) in f
 this app. The guard leaves the verified chain in the request's auth, and the executor
 hands it to the partner's own run as config, never as state: a chain is a credential,
 and a checkpoint is no place for one.
+
+Since Chapter 12 the request handler honours a send's key for every skill whose terms on
+the card state a key window (`KeyedHandler`): a repeat of a key inside the window gets
+the task the first send opened, and nothing runs again. The SDK's own handler does
+nothing with a message id but pass it on.
 """
 
-from collections.abc import Callable, Mapping, Sequence
+import asyncio
+import hashlib
+import json
+import time
+
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -44,10 +54,14 @@ from a2a.types import (
     AgentExtension,
     AgentInterface,
     AgentSkill,
+    Message,
+    SendMessageRequest,
     Task,
     TaskArtifactUpdateEvent,
     TaskStatusUpdateEvent,
 )
+from a2a.utils.errors import InvalidParamsError
+from a2a.utils.task import apply_history_length
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from jwt.algorithms import OKPAlgorithm
 from langchain_core.runnables import RunnableConfig
@@ -58,6 +72,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Route
 
+from seamkit.contract import terms_of
 from seamkit.delegation import Verified
 from seamkit.errors import SeamError
 
@@ -105,25 +120,109 @@ def push_sender(http: httpx.AsyncClient) -> tuple[
     return configs, BasePushNotificationSender(http, configs)
 
 
+@dataclass
+class Kept:
+    """A key the partner has seen: what was asked, when, and the task it opened."""
+
+    digest: str  # the request's skill and data, hashed: a repeat must match it
+    at: float
+    task: "asyncio.Future[str]"  # resolved with the task id once the first send has one
+
+
+Keys = MutableMapping[tuple[str, str], Kept]
+
+
+def skill_of(message: Message) -> str:
+    return str(message.metadata["skill"]) if "skill" in message.metadata else ""
+
+
+def request_digest(message: Message) -> str:
+    """What a repeat must ask for again: the skill and the data, never the ids."""
+    asked = {"skill": skill_of(message), "data": get_data_parts(message.parts)}
+    raw = json.dumps(asked, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+
+
+def caller_of(call: ServerCallContext) -> str:
+    """Who sent the call: the workload that holds the verified chain, else the user."""
+    verified = verified_of(call)
+    return verified.path[-1] if verified else call.user.user_name
+
+
+def key_windows(card: AgentCard) -> dict[str, int]:
+    """skill -> the seconds its terms in force promise to honour a key."""
+    revisions = terms_of(card)
+    held = revisions[0].skills if revisions else {}
+    return {sid: s.key_seconds for sid, s in held.items() if s.key_seconds is not None}
+
+
+class KeyedHandler(DefaultRequestHandler):
+    """The partner's half of a key: a repeat inside the window gets the first task."""
+
+    def __init__(self, *args: Any, windows: Mapping[str, int], keys: Keys,
+                 now: Callable[[], float], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.windows, self.keys, self.now = windows, keys, now
+
+    async def on_message_send(self, params: SendMessageRequest,
+                              context: ServerCallContext) -> Message | Task:
+        message = params.message
+        window = self.windows.get(skill_of(message))
+        if message.task_id or window is None:  # a follow-up, or no key promised
+            return await self._send(params, context)
+        index = (caller_of(context), message.message_id)  # scoped to who sent it
+        asked, kept = request_digest(message), self.keys.get(index)
+        if kept and self.now() - kept.at < window:  # a repeat inside the window
+            if kept.digest != asked:  # the same key for another request
+                raise InvalidParamsError(message="key reused for a different request")
+            task = await self.task_store.get(await kept.task, context)  # may wait
+            if not isinstance(task, Task):
+                raise InvalidParamsError(message="key names a task no longer held")
+            return apply_history_length(task, params.configuration)
+        kept = self.keys[index] = Kept(asked, self.now(),
+                                       asyncio.get_running_loop().create_future())
+        try:
+            result = await self._send(params, context)
+        except BaseException:
+            del self.keys[index]  # no task was recorded: the next send is a first
+            kept.task.cancel()
+            raise
+        kept.task.set_result(result.id if isinstance(result, Task) else "")
+        return result
+
+    async def _send(self, params: SendMessageRequest,
+                    context: ServerCallContext) -> Message | Task:
+        result: Message | Task = await super().on_message_send(params, context)
+        return result
+
+
 def a2a_app(card: AgentCard, executor: AgentExecutor,
             extra: Sequence[BaseRoute] = (),
             store: TaskStore | None = None,
             push: tuple[InMemoryPushNotificationConfigStore,
-                        PushNotificationSender] | None = None) -> Starlette:
+                        PushNotificationSender] | None = None,
+            keys: Keys | None = None,
+            now: Callable[[], float] = time.time) -> Starlette:
     """A Starlette app serving the card and the JSON-RPC endpoint at the card's URL.
 
     `extra` adds routes beside them, such as the key set a card's signature names.
     `store` is the task store, when the partner also writes tasks outside a request.
     `push` is the push config store and sender (Chapter 11); without it a push config
     on a send is ignored, and nobody is ever rung.
+    `keys` is the key index (Chapter 12), kept across releases like the task store.
+    Its windows come from the card's own terms, so what the partner promises and what
+    its handler does cannot disagree.
     """
     configs, sender = push or (None, None)
-    handler = DefaultRequestHandler(
+    handler = KeyedHandler(
         agent_executor=executor, task_store=store or InMemoryTaskStore(),
-        agent_card=card, push_config_store=configs, push_sender=sender)
+        agent_card=card, push_config_store=configs, push_sender=sender,
+        windows=key_windows(card), keys={} if keys is None else keys, now=now)
     routes = [*create_agent_card_routes(card), *extra,
               *create_jsonrpc_routes(handler, "/")]
-    return Starlette(routes=routes)
+    app = Starlette(routes=routes)
+    app.state.handler = handler  # what a test reaches the key index through
+    return app
 
 
 def key_set_route(path: str, keys: Mapping[str, Ed25519PublicKey]) -> Route:
@@ -218,8 +317,11 @@ class GraphExecutor(AgentExecutor):
         await updater.start_work()
         # The caller's contextId is our thread_id. We minted it; the caller records it.
         call = context.call_context
+        # Chapter 12: the key the caller sent, from which every onward key is derived
         config: RunnableConfig = {"configurable": {"thread_id": context.context_id,
                                                    "task_id": context.task_id,
+                                                   "inbound_key":
+                                                       context.message.message_id,
                                                    **self.configure(call)}}
         data = get_data_parts(context.message.parts)[0]
         if context.task_id in self.held:  # a renewal: resume with the held answer

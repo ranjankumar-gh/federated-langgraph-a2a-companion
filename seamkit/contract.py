@@ -18,6 +18,8 @@ from a2a.types import AgentCard, AgentExtension
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel, create_model
 
+from seamkit.retry import NO_RETRY, RetryPolicy
+
 if TYPE_CHECKING:
     from seamkit.remote import SeamSpec
 
@@ -65,6 +67,9 @@ class SkillTerms:
     # Chapter 10: the longest a task may wait on the partner's own people before the
     # partner reassigns or fails it; None states no wait horizon
     wait_seconds: int | None = None
+    # Chapter 12: how long the partner answers a repeat of a send's key with the task
+    # the first send opened; None honours no key, and a resend is a second task
+    key_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +110,10 @@ class Expectations:
     # and how often a backstop poll reads a task a push may have been lost for
     delivery: str = "stream"
     backstop_seconds: int | None = None
+    # Chapter 12: how calls on this seam are retried, and whether a first send looks
+    # its key up first, on a partner that honours none (a crash between send and record)
+    retry: RetryPolicy = NO_RETRY
+    lookup: bool = False
     # Chapter 8: artifact key -> how a read is closed (pattern, choices, items) or
     # capped (max_chars); seamkit.ingress turns these into the seam's ingress rules.
     ingress: Mapping[str, Mapping[str, Any]] = dc_field(default_factory=dict)
@@ -159,6 +168,7 @@ def check(terms: SeamTerms, expects: Expectations,
               for q in skill.asks if q not in (*expects.answers, *expects.refuses)]
     found += _auth(terms, expects) + _slo(skill, expects)  # 6. and 7.
     found += _wait(skill, expects)  # 8. Chapter 10
+    found += _retry(skill, terms, expects)  # 9. Chapter 12
     return [_breach(terms, expects, d) for d in found]
 
 
@@ -211,6 +221,17 @@ def _wait(skill: SkillTerms, expects: Expectations) -> list[str]:
     if skill.wait_seconds > expects.wait_seconds:
         return [f"may wait {skill.wait_seconds} s on its own people, longer than "
                 f"the {expects.wait_seconds} s this seam waits"]
+    return []
+
+
+def _retry(skill: SkillTerms, terms: SeamTerms, expects: Expectations) -> list[str]:
+    """A seam that resends must finish resending while the partner keeps its key."""
+    policy = expects.retry
+    if policy.attempts <= 1 or skill.key_seconds is None:  # nothing is resent
+        return []
+    if policy.deadline_seconds > skill.key_seconds - terms.skew_seconds:
+        return [f"keeps a key {skill.key_seconds} s, and this seam resends for "
+                f"{policy.deadline_seconds:g} s plus {terms.skew_seconds} s of skew"]
     return []
 
 
@@ -291,7 +312,8 @@ def _skill(raw: Mapping[str, Any]) -> SkillTerms:
         float(p95) if p95 is not None else None,
         float(cost) if cost is not None else None,
         str(raw.get("compensated_by", "")),
-        int(raw["wait_seconds"]) if raw.get("wait_seconds") is not None else None)
+        int(raw["wait_seconds"]) if raw.get("wait_seconds") is not None else None,
+        int(raw["key_seconds"]) if raw.get("key_seconds") is not None else None)
 
 
 def _terms(raw: Mapping[str, Any]) -> SeamTerms:
@@ -328,7 +350,14 @@ def load_expectations(path: Path) -> Expectations:
         wait_seconds=int(raw["wait_seconds"]) if "wait_seconds" in raw else None,
         delivery=str(raw.get("delivery", "stream")),
         backstop_seconds=(int(raw["backstop_seconds"])
-                          if "backstop_seconds" in raw else None))
+                          if "backstop_seconds" in raw else None),
+        retry=_policy(raw.get("retry", {})), lookup=bool(raw.get("lookup", False)))
+
+
+def _policy(raw: Mapping[str, Any]) -> RetryPolicy:
+    return RetryPolicy(int(raw.get("attempts", 1)), float(raw.get("base", 1.0)),
+                       float(raw.get("cap", 60.0)),
+                       float(raw.get("deadline_seconds", 0.0)))
 
 
 # The keys of a [reads.*] table the ingress filter reads (Chapter 8); the shape check
@@ -346,7 +375,8 @@ def seam_spec(expects: Expectations) -> "SeamSpec":
                     receives=dict(expects.into), asks_caller=bool(expects.answers),
                     timeout=expects.slo_seconds, shapes=dict(expects.reads),
                     rules=rules_of(expects), roles=expects.roles,
-                    wait_seconds=expects.wait_seconds)
+                    wait_seconds=expects.wait_seconds, retry=expects.retry,
+                    lookup=expects.lookup)
 
 
 def args_model(skill_id: str, skill: SkillTerms) -> type[BaseModel]:

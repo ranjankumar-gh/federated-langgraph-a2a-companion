@@ -45,11 +45,16 @@ ADJUSTER = "adjuster:adj-117"
 MANAGER_SESSION, MANAGER = "session-mgr-204", "manager:mgr-204"
 LEAD_SESSION, LEAD = "session-lead-031", "lead:tl-031"
 
+# Chapter 12: the reconciliation job's own session. It is nobody's, and it names no
+# claim, so its chain can list a partner's tasks for Claims and read none of them.
+RECONCILER_SESSION, RECONCILER = "session-reconcile", "service:reconciler"
+
 # The issuer's own records: whose session it is, and which claims she is working.
 SESSIONS: dict[str, tuple[str, frozenset[str]]] = {
     ADJUSTER_SESSION: (ADJUSTER, frozenset({"CLM-1001", "CLM-1002"})),
     MANAGER_SESSION: (MANAGER, frozenset()),
-    LEAD_SESSION: (LEAD, frozenset())}
+    LEAD_SESSION: (LEAD, frozenset()),
+    RECONCILER_SESSION: (RECONCILER, frozenset())}
 
 # Each person's role, as Meridian's directory records it: an approval states it.
 ROLES: dict[str, str] = {ADJUSTER: "claims/adjuster",
