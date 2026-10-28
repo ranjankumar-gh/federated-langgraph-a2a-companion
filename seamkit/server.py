@@ -92,18 +92,22 @@ def delegation_config(call: ServerCallContext) -> dict[str, Any]:
 
 def agent_card(name: str, url: str, release: str, skills: Mapping[str, str],
                extensions: Sequence[AgentExtension] = (),
-               push: bool = False) -> AgentCard:
+               push: bool = False,
+               protocols: Sequence[str] = ("1.0",)) -> AgentCard:
     """A minimal card: one JSON-RPC interface, no streaming, one entry per skill.
 
     `extensions` carries what the protocol has no field for, such as seam terms.
     `push` says the partner can send push notifications (Chapter 11).
+    `protocols` lists one interface per protocol version, as a partner in the middle
+    of a migration serves both (Chapter 15).
     """
     return AgentCard(
         name=name,
         description=f"{name} (Meridian claims federation)",
         version=release,
         supported_interfaces=[AgentInterface(
-            protocol_binding="JSONRPC", protocol_version="1.0", url=url)],
+            protocol_binding="JSONRPC", protocol_version=version, url=url)
+            for version in protocols],
         capabilities=AgentCapabilities(streaming=False, push_notifications=push,
                                        extensions=list(extensions)),
         default_input_modes=["application/json"],

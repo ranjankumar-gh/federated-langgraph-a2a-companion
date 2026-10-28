@@ -1,0 +1,26 @@
+# When Claims first saw each revision of the partner's terms on its card.
+# Written by record_seen, committed, and never edited by hand.
+
+[revisions."v7"]
+first_seen = 2026-06-01
+release = "v7"
+
+[revisions."v8"]
+first_seen = 2026-10-05
+release = "v7"
+
+[revisions."v7.1"]
+first_seen = 2026-10-10
+release = "v7"
+
+[revisions."v7.2"]
+first_seen = 2026-10-12
+release = "v7"
+
+[revisions."v7.3"]
+first_seen = 2026-12-07
+release = "v7"
+
+[revisions."v7.4"]
+first_seen = 2027-01-04
+release = "v7"

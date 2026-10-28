@@ -35,17 +35,19 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import httpx
 from a2a.client import A2ACardResolver, Client, ClientCallContext, ClientConfig
 from a2a.client import A2AClientError, ClientFactory
 from a2a.helpers import get_data_parts, new_data_message
-from a2a.types import AgentCard, CancelTaskRequest, GetTaskRequest, ListTasksRequest
+from a2a.types import AgentCard, AgentInterface, CancelTaskRequest, GetTaskRequest
+from a2a.types import ListTasksRequest
 from a2a.types import Role
 from a2a.types import SendMessageConfiguration
 from a2a.types import SendMessageRequest, Task, TaskPushNotificationConfig, TaskState
+from a2a.utils.constants import VERSION_HEADER
 from a2a.utils.errors import A2AError
 from langgraph.types import interrupt
 
@@ -64,6 +66,7 @@ from seamkit.contract import (
 )
 from seamkit.breaker import SeamBreaker
 from seamkit.errors import (
+    BehaviourDrift,
     BreakerOpen,
     CardUntrusted,
     ContractBreach,
@@ -82,6 +85,7 @@ from seamkit.ingress import (
     DETAIL_MAX_CHARS,
     QUESTION_MAX_CHARS,
     IngressRule,
+    Provenance,
     admit,
     egress,
     log_findings,
@@ -162,16 +166,32 @@ class PartnerConnection:
     upcoming: tuple[Breach, ...] = ()  # in announced revisions, each with its date
     trust: TrustDecision | None = None  # the card trust policy's verdict (Chapter 5)
     pinned: PartnerTrust | None = None  # what the verdict was decided against
-    # (skill, card digest) -> what Claims observed; shared across refreshes
-    records: dict[tuple[str, str], TrackRecord] = field(default_factory=dict)
+    # (skill, card digest, behaviour version) -> what Claims observed; shared across
+    # refreshes. Chapter 15 added the behaviour version to Chapter 5's key.
+    records: dict[tuple[str, str, str], TrackRecord] = field(default_factory=dict)
+    # Chapter 15: the protocol version of the interface Claims chose, the behaviour
+    # version each skill's answers are recorded under, and the skills a drift holds
+    protocol: str = ""
+    behaviour: dict[str, str] = field(default_factory=dict)
+    held: dict[str, str] = field(default_factory=dict)
 
     @property
     def release(self) -> str:
         return self.card.version
 
     def record(self, skill: str) -> TrackRecord:
+        """What Claims observed of `skill` under this card and this behaviour."""
         digest = self.trust.digest if self.trust else ""
-        return self.records.setdefault((skill, digest), TrackRecord())
+        key = (skill, digest, self.behaviour.get(skill, ""))
+        return self.records.setdefault(key, TrackRecord())
+
+    def rekey(self, skill: str, behaviour: str, keep: bool = False) -> None:
+        """Record `skill` under a new behaviour version, from nothing unless `keep`."""
+        earned = self.record(skill)
+        self.behaviour[skill] = behaviour
+        if keep:
+            digest = self.trust.digest if self.trust else ""
+            self.records[(skill, digest, behaviour)] = earned
 
     def gradient(self, skill: str) -> Gradient:
         gradients = self.pinned.gradients if self.pinned else {}
@@ -210,12 +230,34 @@ def terms_digest(connection: "PartnerConnection", skill: str) -> str:
     return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
 
 
+def choose(card: AgentCard, speaks: Sequence[str]) -> AgentInterface | None:
+    """The card's interface on the newest protocol version this seam speaks, or None."""
+    for version in speaks:  # newest first: the seam's file decides, not the SDK
+        for interface in card.supported_interfaces:
+            if interface.protocol_version == version:
+                return interface
+    return None
+
+
+def speaking(card: AgentCard, interface: AgentInterface,
+             http: httpx.AsyncClient) -> AgentCard:
+    """The card as Claims' client sees it: the one interface Claims chose. Every
+    request on `http` then carries that interface's protocol version in its header."""
+    chosen = AgentCard()
+    chosen.CopyFrom(card)
+    del chosen.supported_interfaces[:]
+    chosen.supported_interfaces.append(interface)
+    http.headers[VERSION_HEADER] = interface.protocol_version
+    return chosen
+
+
 async def connect(url: str, http: httpx.AsyncClient,
                   expects: Expectations | None = None,
                   policy: CrossingPolicy = NO_CROSSING,
                   terms: Sequence[SeamTerms] = (),
                   trust: PartnerTrust | None = None,
-                  records: dict[tuple[str, str], TrackRecord] | None = None,
+                  records: dict[tuple[str, str, str], TrackRecord] | None = None,
+                  seen: Mapping[str, date] | None = None,
                   ) -> PartnerConnection:
     """Fetch the partner's card, decide whether to trust it, and check the contract.
 
@@ -223,26 +265,49 @@ async def connect(url: str, http: httpx.AsyncClient,
     `terms` stands in for a partner that publishes none: the terms agreed on paper.
     `trust` is the owner's entry in the caller's card trust policy; without one the
     card is used as fetched, which is Chapter 3's behaviour and nobody's production.
+    Since Chapter 15 the client speaks the protocol version the seam's expectations
+    choose, and `seen` (when Claims first saw each revision) feeds the notice rule.
     """
     card = await A2ACardResolver(http, url).get_agent_card()
+    speaks = expects.protocols if expects else ()
+    interface = choose(card, speaks) if speaks else None
+    client_card, protocol = card, ""
+    if interface is not None:
+        client_card = speaking(card, interface, http)
+        protocol = interface.protocol_version
     factory = ClientFactory(ClientConfig(httpx_client=http, streaming=False))
     kept = {} if records is None else records
     decision = None
-    if trust is not None:
+    if trust is not None:  # decided on the card as fetched, every interface on it
         decision = decide(card, url, trust, (expects.skill,) if expects else ())
         log_decision(decision)
         if not decision.trusted:  # a card that fails the policy has no terms to check
-            return PartnerConnection(card, factory.create(card), trust=decision,
-                                     pinned=trust, records=kept)
+            return PartnerConnection(card, factory.create(client_card), trust=decision,
+                                     pinned=trust, records=kept, protocol=protocol)
     revisions = tuple(terms) or terms_of(card)
     if expects is None:
-        return PartnerConnection(card, factory.create(card), revisions,
-                                 trust=decision, pinned=trust, records=kept)
-    now, announced = held_to(revisions, expects, policy)
+        return PartnerConnection(card, factory.create(client_card), revisions,
+                                 trust=decision, pinned=trust, records=kept,
+                                 protocol=protocol)
+    now, announced = held_to(revisions, expects, policy, seen)
+    if speaks and interface is None:  # a breach in force: nothing is sent on the seam
+        now.append(unspoken(card, expects, revisions))
     for breach in announced:  # found on the day it is announced, not the day it lands
         contract_logger.warning("contract breach announced: %s", breach)
-    return PartnerConnection(card, factory.create(card), revisions, tuple(now),
-                             tuple(announced), decision, trust, kept)
+    return PartnerConnection(card, factory.create(client_card), revisions, tuple(now),
+                             tuple(announced), decision, trust, kept, protocol)
+
+
+def unspoken(card: AgentCard, expects: Expectations,
+             revisions: Sequence[SeamTerms]) -> Breach:
+    """The breach of a card with no interface on a protocol version the seam speaks."""
+    offered = sorted(i.protocol_version or "unstated"
+                     for i in card.supported_interfaces)
+    current = revisions[0] if revisions else None
+    return Breach(expects.seam, current.revision if current else "none",
+                  current.effective if current else date.min,
+                  f"{expects.owner}'s card offers protocol {', '.join(offered)}, and "
+                  f"this seam speaks {', '.join(expects.protocols)}")
 
 
 async def refresh(connection: PartnerConnection, url: str, http: httpx.AsyncClient,
@@ -258,7 +323,11 @@ async def refresh(connection: PartnerConnection, url: str, http: httpx.AsyncClie
                           records=connection.records)
     same = connection.trust and fresh.trust and (
         fresh.trust.digest == connection.trust.digest)
-    return connection if same else fresh
+    if same:
+        return connection
+    fresh.behaviour.update(connection.behaviour)  # a new card keeps what canaries found
+    fresh.held.update(connection.held)
+    return fresh
 
 
 @dataclass(frozen=True)
@@ -275,6 +344,7 @@ class CrossingRecord:
     state: str = ""
     error: str = ""
     idempotency_key: str = ""  # joins a crossing to its ledger entry
+    behaviour: str = ""  # Chapter 15: the behaviour version the skill is recorded under
 
 
 crossing_logger = logging.getLogger("seamkit.crossing")
@@ -400,7 +470,8 @@ class RemoteAgentNode:
 
     def held_back(self) -> bool:
         """The send would be refused before it left: no lookup goes first, either."""
-        return bool(self.partner.refuses(self.seam.skill) or self.partner.breaches)
+        return bool(self.partner.refuses(self.seam.skill) or self.partner.breaches
+                    or self.seam.skill in self.partner.held)
 
     def key_terms(self) -> tuple[int | None, int]:
         """The key window the partner's terms in force state for the skill, and skew."""
@@ -448,7 +519,8 @@ class RemoteAgentNode:
         return {**intended(self.seam.name, self.seam.skill,
                            card_digest(self.partner.card), self.authority(),
                            self.partner.release),
-                "terms": terms_digest(self.partner, self.seam.skill)}
+                "terms": terms_digest(self.partner, self.seam.skill),
+                "behaviour": self.partner.behaviour.get(self.seam.skill, "")}
 
     async def call_once(self, data: Mapping[str, Any],
                         key: str | None = None) -> dict[str, Any]:
@@ -519,6 +591,10 @@ class RemoteAgentNode:
                 error=ContractBreach.__name__))
             raise ContractBreach(
                 self.seam.name, "; ".join(b.detail for b in self.partner.breaches))
+        if drift := self.partner.held.get(self.seam.skill):  # Chapter 15: a hold
+            self.log(self._record("send", tuple(data), key or "")(
+                error=BehaviourDrift.__name__))
+            raise BehaviourDrift(self.seam.name, drift)
         # Chapter 14: only a send that opens work asks the breaker; a reply to an open
         # task, a read and a cancel never do
         breaker = None if (link or {}).get("task_id") else self.breaker
@@ -581,6 +657,38 @@ class RemoteAgentNode:
                         state=TaskState.Name(task.status.state)))
         return task
 
+    async def probe(self, data: Mapping[str, Any],
+                    key: str) -> tuple[dict[str, Any], dict[str, Provenance]]:
+        """Chapter 15: one canary task on this seam, judged and never kept.
+
+        It crosses as a real task does: only the fields the seam sends, to a card the
+        policy trusts, under a contract in force, through the shape check and the
+        ingress filter. It is never observed in a track record, never held to the
+        unproven ceiling, and never asks or tells the breaker.
+        """
+        if why := self.partner.refuses(self.seam.skill):
+            raise CardUntrusted(self.seam.name, why)
+        if self.partner.breaches:
+            raise ContractBreach(
+                self.seam.name, "; ".join(b.detail for b in self.partner.breaches))
+        task = await self._post({k: data[k] for k in self.seam.sends}, None, key)
+        if (error := OUTCOMES[task.status.state]) is not None:
+            raise error(self.seam.name, TaskState.Name(task.status.state), task.id)
+        answer: dict[str, Any] = {}
+        for artifact in task.artifacts:
+            for part in get_data_parts(artifact.parts):
+                answer.update(part)
+        missing = [k for k in self.seam.receives if k not in answer]
+        if wrong := ([f"artifact lacks {missing}"] if missing
+                     else violations(answer, self.seam.shapes)):
+            raise MalformedAnswer(self.seam.name, "; ".join(wrong), task.id)
+        mapped = {ours: answer[theirs] for theirs, ours in self.seam.receives.items()}
+        if self.seam.rules is None:
+            return mapped, {}
+        admitted = admit(mapped, self.seam.rules, self.seam.name, task.id,
+                         self.partner.release)
+        return admitted.update, admitted.tags
+
     async def read(self, task_id: str) -> Task:
         """Read a recorded task, as a sweep or a resume gate does: one logged get."""
         return await self._get(task_id)
@@ -622,7 +730,9 @@ class RemoteAgentNode:
                 key: str = "") -> Callable[..., CrossingRecord]:
         def finish(**result: str) -> CrossingRecord:
             return CrossingRecord(self.seam.name, self.seam.owner, self.partner.release,
-                                  call, sent, idempotency_key=key, **result)
+                                  call, sent, idempotency_key=key,
+                                  behaviour=self.partner.behaviour.get(
+                                      self.seam.skill, ""), **result)
 
         return finish
 

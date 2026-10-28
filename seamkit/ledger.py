@@ -61,6 +61,9 @@ class LedgerEntry(TypedDict):
     compensates: NotRequired[str]
     # Chapter 14: the partner stop under which this thread's own run cancelled the task
     stopped_by: NotRequired[str]
+    # Chapter 15: the behaviour version the skill was recorded under when this task
+    # was sent, from the seam's accepted canary baseline; "" for a seam with none
+    behaviour: NotRequired[str]
 
 
 def merge_ledger(current: Mapping[str, LedgerEntry],

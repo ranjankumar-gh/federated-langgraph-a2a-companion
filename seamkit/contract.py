@@ -19,6 +19,7 @@ from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel, create_model
 
 from seamkit.breaker import MODES, BreakerPolicy
+from seamkit.canary import DRIFT_ACTIONS, Band, CanaryPolicy
 from seamkit.retry import NO_RETRY, RetryPolicy
 
 if TYPE_CHECKING:
@@ -120,6 +121,12 @@ class Expectations:
     lookup: bool = False
     # Chapter 14: the seam's breaker and its degraded mode; None keeps no breaker
     breaker: BreakerPolicy | None = None
+    # Chapter 15: the protocol versions this seam speaks, newest first (() takes the
+    # card as the SDK finds it); the days of notice a breaking revision must give;
+    # and the seam's behavioural canaries, None for a seam nobody probes
+    protocols: tuple[str, ...] = ()
+    notice_days: int | None = None
+    canary: CanaryPolicy | None = None
     # Chapter 8: artifact key -> how a read is closed (pattern, choices, items) or
     # capped (max_chars); seamkit.ingress turns these into the seam's ingress rules.
     ingress: Mapping[str, Mapping[str, Any]] = dc_field(default_factory=dict)
@@ -176,18 +183,39 @@ def check(terms: SeamTerms, expects: Expectations,
     found += _wait(skill, expects)  # 8. Chapter 10
     found += _retry(skill, terms, expects)  # 9. Chapter 12
     found += _late(skill, expects)  # Chapter 14
+    found += _canary(skill, expects)  # Chapter 15
     return [_breach(terms, expects, d) for d in found]
 
 
 def held_to(revisions: Sequence[SeamTerms], expects: Expectations,
-            policy: CrossingPolicy) -> tuple[list[Breach], list[Breach]]:
-    """Breaches in the revision in force, and in every revision announced after it."""
+            policy: CrossingPolicy, seen: Mapping[str, date] | None = None,
+            ) -> tuple[list[Breach], list[Breach]]:
+    """Breaches in the revision in force, and in every revision announced after it.
+
+    `seen` is when Claims first saw each revision on the card (Chapter 15): an
+    announced breaking revision seen too late also breaks the seam's notice term.
+    """
     if not revisions:
         return [Breach(expects.seam, "none", date.min,
                        f"{expects.owner} publishes no terms")], []
     current, *announced = revisions
-    return (check(current, expects, policy),
-            [b for terms in announced for b in check(terms, expects, policy)])
+    later: list[Breach] = []
+    for terms in announced:
+        found = check(terms, expects, policy)
+        later += found + _notice(terms, found, expects, seen or {})
+    return check(current, expects, policy), later
+
+
+def _notice(terms: SeamTerms, found: list[Breach], expects: Expectations,
+            seen: Mapping[str, date]) -> list[Breach]:
+    """A breaking revision first seen too close to its date breaks the notice term."""
+    first = seen.get(terms.revision)
+    if not found or expects.notice_days is None or first is None:
+        return []
+    if (days := (terms.effective - first).days) >= expects.notice_days:
+        return []
+    return [_breach(terms, expects, f"breaks this seam {days} days after Claims first "
+                    f"saw it, inside the {expects.notice_days} days of notice agreed")]
 
 
 def _breach(terms: SeamTerms, expects: Expectations, detail: str) -> Breach:
@@ -251,6 +279,14 @@ def _late(skill: SkillTerms, expects: Expectations) -> list[str]:
         return []
     return [f"promises {skill.p95_seconds:g} s at p95, and this seam's breaker "
             f"counts an answer after {late:g} s against it"]
+
+
+def _canary(skill: SkillTerms, expects: Expectations) -> list[str]:
+    """A canary is a real task: on a skill that commits, a real transaction."""
+    if expects.canary is None or not skill.compensated_by:
+        return []
+    return [f"commits at the partner (undone by {skill.compensated_by}), "
+            "so it is never sent a canary"]
 
 
 def violations(answer: Mapping[str, Any], shapes: Mapping[str, Field]) -> list[str]:
@@ -372,7 +408,10 @@ def load_expectations(path: Path) -> Expectations:
         backstop_seconds=(int(raw["backstop_seconds"])
                           if "backstop_seconds" in raw else None),
         retry=_policy(raw.get("retry", {})), lookup=bool(raw.get("lookup", False)),
-        breaker=_breaker(raw["breaker"]) if "breaker" in raw else None)
+        breaker=_breaker(raw["breaker"]) if "breaker" in raw else None,
+        protocols=tuple(str(p) for p in raw.get("protocols", [])),
+        notice_days=int(raw["notice_days"]) if "notice_days" in raw else None,
+        canary=_canary_policy(raw["canary"]) if "canary" in raw else None)
 
 
 def _policy(raw: Mapping[str, Any]) -> RetryPolicy:
@@ -388,6 +427,16 @@ def _breaker(raw: Mapping[str, Any]) -> BreakerPolicy:
     return BreakerPolicy(float(raw["late_seconds"]), int(raw["failures"]),
                          float(raw["window_seconds"]), float(raw["open_seconds"]),
                          str(raw.get("trial", "")), int(raw["max_in_flight"]), mode)
+
+
+def _canary_policy(raw: Mapping[str, Any]) -> CanaryPolicy:
+    action = str(raw.get("on_drift", "unproven"))
+    if action not in DRIFT_ACTIONS:
+        raise ValueError(f"drift action {action!r} is not in {sorted(DRIFT_ACTIONS)}")
+    return CanaryPolicy(float(raw["every_seconds"]),
+                        Band(float(raw.get("absolute", 0.0)),
+                             float(raw.get("relative", 0.0))),
+                        int(raw.get("confirm", 1)), action)
 
 
 # The keys of a [reads.*] table the ingress filter reads (Chapter 8); the shape check

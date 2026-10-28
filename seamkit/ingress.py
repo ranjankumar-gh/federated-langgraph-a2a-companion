@@ -58,6 +58,9 @@ class Provenance(TypedDict):
     derived_from: list[str]  # the fields it was computed from, Claims' own included
     # Chapter 14: who answered in the partner's place while its seam was degraded
     substitute: NotRequired[str]
+    # Chapter 15: the golden task a canary answer was sent for; such an answer is
+    # judged, kept for audit, and never written to claim state
+    canary: NotRequired[str]
 
 
 def merge_provenance(current: Mapping[str, Provenance],

@@ -47,7 +47,7 @@ from a2a.types import AgentCard
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from meridian.agents import PART_PRICES, estimate_repair
+from meridian.agents import PART_PRICES
 from meridian.identity import MERIDIAN, revocation_sources
 from meridian.incident import introspect
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
@@ -241,6 +241,9 @@ class NorthgateExecutor(AgentExecutor):
         self.acts: list[dict[str, Any]] = []  # every act point: when, which task, outcome
         self.canceled: list[str] = []  # tasks that ended canceled, never billed
         self.booked: dict[str, Booking] = {}  # Chapter 13: booking task -> the booking
+        # Chapter 15: the price table behind estimate_repair. A model swap changes it
+        # and nothing on the card (meridian.incident.swap_model).
+        self.prices: dict[str, float] = dict(PART_PRICES)
 
     async def execute(self, context: RequestContext, queue: EventQueue) -> None:
         assert context.message and context.task_id and context.context_id
@@ -275,7 +278,7 @@ class NorthgateExecutor(AgentExecutor):
                 name="estimate_history")
             await updater.complete()
             return
-        if not set(request["damaged_parts"]) <= set(PART_PRICES):
+        if not set(request["damaged_parts"]) <= set(self.prices):
             await updater.reject()
             return
         frame = "frame" in request["damaged_parts"]
@@ -291,7 +294,8 @@ class NorthgateExecutor(AgentExecutor):
                                 "why": "frame damage needs a photo"})]))
             return
         self.pending[context.task_id] = {"claim_id": request["claim_id"],
-                                         "estimate": estimate_repair(request)}
+                                         "estimate": sum(self.prices[part] for part
+                                                         in request["damaged_parts"])}
         if "notes" in {f.name for f in self.terms.skills["estimate_repair"].outputs}:
             self.pending[context.task_id]["notes"] = self.notes.get(
                 str(request["claim_id"]), "")

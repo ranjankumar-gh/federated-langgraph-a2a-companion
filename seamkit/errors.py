@@ -112,3 +112,12 @@ class WaitExpired(SeamError):
     claim goes to an adjuster, like every SeamError; approvals given on the task do not
     carry over to any task that replaces it.
     """
+
+
+class BehaviourDrift(SeamError):
+    """The seam's canaries found the skill answering outside its accepted baseline,
+    and the seam's drift action holds it.
+
+    Raised by the seam's node before anything is sent. Only this seam stops, and only
+    a person, by accepting a new baseline or releasing the hold, restarts it.
+    """

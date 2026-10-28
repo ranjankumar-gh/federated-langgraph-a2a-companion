@@ -42,6 +42,11 @@ than the caller's timeout never arrives, as with a real client's timeout. Each c
 breaker, Risk's on its peer seam included, is the fix (seamkit.breaker,
 meridian.containment).
 
+Chapter 15's incident is swap_model below: Northgate moves estimate_repair onto a new
+parts-matching model behind an unchanged card, and a door drops from 1,800 to 1,250.
+Every check passes. The behavioural canaries (seamkit.canary, meridian.canaries) are
+the fix.
+
 Chapter 13's incident is the saga graph built with no compensator,
 meridian.saga.build_saga_graph(workers, None): a reversed claim is referred and the run
 ends, leaving the booking standing at Northgate. The saga plan and the compensator
@@ -51,7 +56,7 @@ ends, leaving the booking standing at Northgate. The saga plan and the compensat
 import json
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 from a2a.client import ClientCallContext
@@ -301,3 +306,27 @@ class Clocked(httpx.AsyncBaseTransport):
             raise httpx.ReadTimeout("no answer inside the caller's timeout",
                                     request=request)
         return response
+
+
+# Chapter 15 ---------------------------------------------------------------------------
+
+# The parts-matching model Northgate moved estimate_repair onto prices a door from the
+# aftermarket. Nothing on Northgate's card changes: not the release, not the terms, not
+# the description, so not the card's digest.
+AFTERMARKET_PRICES: dict[str, float] = {"bumper": 1_200.0, "door": 1_250.0,
+                                        "frame": 6_500.0}
+
+
+class Estimating(Protocol):
+    prices: dict[str, float]
+
+
+class HasEstimator(Protocol):
+    @property
+    def executor(self) -> Estimating: ...
+
+
+def swap_model(northgate: HasEstimator,
+               prices: Mapping[str, float] = AFTERMARKET_PRICES) -> None:
+    """Chapter 15's incident: the estimator behind an unchanged card answers anew."""
+    northgate.executor.prices = dict(prices)

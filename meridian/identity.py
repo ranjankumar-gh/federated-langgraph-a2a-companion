@@ -54,6 +54,13 @@ LEAD_SESSION, LEAD = "session-lead-031", "lead:tl-031"
 # claim, so its chain can list a partner's tasks for Claims and read none of them.
 RECONCILER_SESSION, RECONCILER = "session-reconcile", "service:reconciler"
 
+# Chapter 15: the on-call for Claims' seams, whose session the canaries run under. Her
+# caseload is the reserved golden claim ids and nothing else, so a canary borrows no
+# adjuster's authority and can name no customer's claim.
+CANARY_SESSION, CANARY_ONCALL = "session-canary", "oncall:claims-seams"
+GOLDEN_CLAIMS = frozenset({"CLM-C01", "CLM-C02", "CLM-C03", "CLM-C04",
+                           "CLM-C11", "CLM-C12", "CLM-C13"})
+
 # Chapter 13: Claims itself, when it undoes a step it took. Not a session: the issuer
 # mints this root only for a claim Claims names, and only for the compensating skills.
 COMPENSATOR = "service:compensator"
@@ -63,7 +70,8 @@ SESSIONS: dict[str, tuple[str, frozenset[str]]] = {
     ADJUSTER_SESSION: (ADJUSTER, frozenset({"CLM-1001", "CLM-1002"})),
     MANAGER_SESSION: (MANAGER, frozenset()),
     LEAD_SESSION: (LEAD, frozenset()),
-    RECONCILER_SESSION: (RECONCILER, frozenset())}
+    RECONCILER_SESSION: (RECONCILER, frozenset()),
+    CANARY_SESSION: (CANARY_ONCALL, GOLDEN_CLAIMS)}
 
 # Each person's role, as Meridian's directory records it: an approval states it.
 ROLES: dict[str, str] = {ADJUSTER: "claims/adjuster",

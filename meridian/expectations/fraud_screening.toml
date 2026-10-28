@@ -2,6 +2,7 @@
 seam = "fraud_screening"
 owner = "Risk"
 skill = "screen_fraud"
+protocols = ["1.0"]  # Chapter 15: newest first; a card offering none is a breach
 sends = ["claim_id", "amount", "days_to_report", "prior_claims"]
 answers = ["police_report"]  # a Claims adjuster answers it
 auth = ["mtls", "delegation"]
@@ -9,6 +10,13 @@ skew_seconds = 30
 slo_seconds = 10.0
 delivery = "stream"  # a blocking send: one answer, seconds long
 lookup = true  # Risk honours no key: look it up before a send, in case one left
+notice_days = 21  # Chapter 15: a breaking revision is on the card 3 weeks ahead
+
+[canary]  # Chapter 15: three golden screenings, judged against the baseline
+every_seconds = 3600  # hourly: screening is Meridian's own, with no price per task
+absolute = 2.0  # a score may move 2 points on 0-100
+confirm = 1  # a wrong score clears fraud: one run out of band is drift
+on_drift = "hold"  # no claim is screened, and none cleared, until a person decides
 
 [reads.fraud_score]
 into = "fraud_score"

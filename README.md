@@ -323,6 +323,32 @@ Run only this chapter's tests with `uv run pytest tests/test_ch13_compensation.p
 
 Run only this chapter's tests with `uv run pytest tests/test_ch14_containment.py`.
 
+### Chapter 15: Contract Version, Behaviour Version
+
+- `seamkit/canary.py`: `Band`, `CanaryPolicy` (read from each seam's `[canary]` table),
+  `Golden`, `Baseline` and its behaviour version, `judge`, and `CanarySuite`, which sends the
+  goldens on the shared clock, acts on drift (`unproven` or `hold`), files a finding, and
+  lets a person `accept` a new baseline. `tick` runs every suite that is due.
+- `seamkit/compat.py`: `diff` (Chapter 4's third exercise), `record_seen` and `load_seen`
+  (when Claims first saw each revision), `matrix` and `render`.
+- `seamkit/contract.py`: `Expectations.protocols`, `notice_days` and `canary`; the notice rule
+  in `held_to`, and the `check` rule that refuses a canary on a skill that commits.
+  `seamkit/remote.py`: the protocol choice at connect (`choose`), the track record keyed by
+  behaviour version, a drift hold (`BehaviourDrift` in `seamkit/errors.py`), the behaviour
+  version on ledger entries and crossing records, and `RemoteAgentNode.probe`.
+- `meridian/canaries.py`: Meridian's goldens and baselines, `canary_suites`, and
+  `with_versions` for the inventory. `meridian/matrix.py`: the estimate seam's matrix,
+  compared with the committed `meridian/compat/repair_estimate.md` (regenerate it with
+  `uv run python -m meridian.matrix` after reviewing the change). `meridian/seen/`: first
+  sightings. `meridian/incident.py`: `swap_model`, the model swap behind an unchanged card.
+- `tests/test_ch15_versions.py`: the incident, the canary that catches it, Chapter 1's 0-1
+  score caught, canaries that never earn trust, a refused canary, accepting a baseline, the
+  detection bound, the behaviour version on the ledger, committing skills refused a canary,
+  `diff`, the matrix gate, the notice rule, the protocol choice, and the inventory's contract
+  column.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch15_versions.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

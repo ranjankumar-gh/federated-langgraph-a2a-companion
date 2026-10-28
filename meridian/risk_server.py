@@ -77,11 +77,12 @@ RISK_TERMS_2027_02 = replace(
         *SCREEN_FRAUD.outputs, Field("basis", "string")))})
 
 
-def risk_card(release: str, terms: SeamTerms = RISK_TERMS) -> AgentCard:
+def risk_card(release: str, terms: SeamTerms = RISK_TERMS,
+              protocols: tuple[str, ...] = ("1.0",)) -> AgentCard:
     """Risk's card for one release, as Risk's pipeline builds and publishes it."""
     return agent_card("Risk fraud screening", RISK_URL, release,
                       {"screen_fraud": "Fraud score 0-100 for one claim"},
-                      extensions=[publish(terms)])
+                      extensions=[publish(terms)], protocols=protocols)
 
 
 # Every card Risk has released, with the 0-1 card Chapter 4's test publishes honestly.
@@ -190,6 +191,8 @@ class RiskPartner:
     # tool reaches Northgate over (None: the in-process wire, with no latency)
     breaker: BreakerPolicy | None = None
     wire: Callable[[ASGIApp], httpx.AsyncBaseTransport] | None = None
+    # Chapter 15: the protocol versions Risk's card offers, one interface each
+    protocols: tuple[str, ...] = ("1.0",)
 
     def __post_init__(self) -> None:
         sources = (revocation_sources() if self.revocations is None
@@ -205,7 +208,7 @@ class RiskPartner:
         if self.breaker is not None:
             self.history_breaker = SeamBreaker("estimate_history", "Northgate",
                                                "estimate_history", self.breaker)
-        self.card = risk_card(self.release, self.terms)
+        self.card = risk_card(self.release, self.terms, self.protocols)
         inner = a2a_app(self.card, self.executor)
         self.guard = Guard(inner, "risk", MERIDIAN_TRUSTS, now=self.now,
                            revoked=self.check)

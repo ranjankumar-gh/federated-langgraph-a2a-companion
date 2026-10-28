@@ -2,6 +2,7 @@
 seam = "repair_estimate"
 owner = "Northgate"
 skill = "estimate_repair"
+protocols = ["1.0"]  # Chapter 15: newest first; a card offering none is a breach
 sends = ["claim_id", "damaged_parts"]
 refuses = ["photo_url"]  # no Claims human photographs a car
 auth = ["mtls", "delegation"]
@@ -10,6 +11,13 @@ revocation_seconds = 120  # the longest a revoked chain may act at Northgate
 slo_seconds = 10.0
 delivery = "push"  # the assessor desk takes about 21 minutes on frame damage
 backstop_seconds = 300  # a lost push is found within five minutes
+notice_days = 21  # Chapter 15: a breaking revision is on the card 3 weeks ahead
+
+[canary]  # Chapter 15: four golden tasks, judged against the accepted baseline
+every_seconds = 21600  # every six hours: 16 tasks a day, billed at 3.5 each
+relative = 0.05  # an estimate may move 5% and still be the same behaviour
+confirm = 1  # an estimate decides a payment: one run out of band is drift
+on_drift = "unproven"  # back under the 5,000 ceiling, and a finding for a person
 
 [breaker]  # Chapter 14: counts only Northgate's failures to answer
 late_seconds = 6.0  # Northgate promises 4 s at p95; later than 6 s counts
