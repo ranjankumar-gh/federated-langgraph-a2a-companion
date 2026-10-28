@@ -349,6 +349,36 @@ Run only this chapter's tests with `uv run pytest tests/test_ch14_containment.py
 
 Run only this chapter's tests with `uv run pytest tests/test_ch15_versions.py`.
 
+### Chapter 16: Testing Agents You Can't Deploy
+
+- `stub/`: the partner stub, which imports nothing of Northgate's (a test holds it to that).
+  `stub/recording.py`: `Exchange` (recorded, canary or scripted), `Recording` and its stamp,
+  `Recorder` (an httpx transport for a partner's staging), `from_baseline`, and `stale`.
+  `stub/faults.py`: `Fault` (`slow`, `down`, `lose_answer`, `fail`, `hang`, `push_lost`) and
+  `FaultScript`. `stub/server.py`: `StubPartner`, held to the partner's terms at build time
+  (`StubOutOfContract`), with its card re-signed under a CI test key; `finish`, `forge` and
+  `restore` drive the hung, forged-push and restored-from-backup rows.
+- `seamkit/contracttest.py`: `suite`, `export` and `load_suite` for the seam contract tests,
+  `verify` (run a suite against any deployment), `conformance`, and `unconfirmed`.
+  `seamkit/remote.py` and `seamkit/breaker.py`: a task that fails after a push seam's send
+  returned now counts against the breaker (`failed_later`).
+- `meridian/stubs.py`: the estimate seam's synthetic requests, scripted answers, `CI_TRUST`,
+  `record`, `northgate_stub`, `estimate_suite` and `with_tests` for the inventory.
+  `meridian/recordings/repair_estimate.json` and `meridian/contracts/repair_estimate.json`:
+  the committed recording and the suite Claims publishes; regenerate both with
+  `uv run python -m meridian.stubs` after reviewing the change.
+  `meridian/attribution.py`: `attribute` and `hop_on`. `meridian/incident.py`:
+  `fail_unpriced`, the incident's switch. `meridian/identity.py`: Claims' CI session, whose
+  caseload is the reserved recording ids.
+- `tests/test_ch16_stub.py`: the stub's card and key, the build-time check, no invented
+  answers, and the fault catalogue for Chapters 11 to 15.
+  `tests/test_ch16_contracts.py`: the incident, Northgate's CI failing the candidate, the
+  suite that ignores values, the committed files, conformance, staleness, paper terms, hop
+  attribution, and the inventory's failure column.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch16_stub.py
+tests/test_ch16_contracts.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

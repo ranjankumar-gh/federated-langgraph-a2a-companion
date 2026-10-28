@@ -47,6 +47,13 @@ parts-matching model behind an unchanged card, and a door drops from 1,800 to 1,
 Every check passes. The behavioural canaries (seamkit.canary, meridian.canaries) are
 the fix.
 
+Chapter 16's incident is fail_unpriced below: a Northgate code release, under the same
+release string and the same terms, answers a part it does not price with a failed task
+where it used to reject it. Claims' estimate breaker counts failures, so it opens on
+Claims' own unpriced requests. The partner stub, held to the terms, and the seam
+contract tests Northgate runs on its release candidate (stub, seamkit.contracttest) are
+the fix.
+
 Chapter 13's incident is the saga graph built with no compensator,
 meridian.saga.build_saga_graph(workers, None): a reversed claim is referred and the run
 ends, leaving the booking standing at Northgate. The saga plan and the compensator
@@ -330,3 +337,20 @@ def swap_model(northgate: HasEstimator,
                prices: Mapping[str, float] = AFTERMARKET_PRICES) -> None:
     """Chapter 15's incident: the estimator behind an unchanged card answers anew."""
     northgate.executor.prices = dict(prices)
+
+
+# Chapter 16 ---------------------------------------------------------------------------
+
+class Validating(Protocol):
+    unpriced: str
+
+
+class HasValidator(Protocol):
+    @property
+    def executor(self) -> Validating: ...
+
+
+def fail_unpriced(northgate: HasValidator) -> None:
+    """Chapter 16's incident: an unpriced part now fails the task instead of
+    rejecting it. The card, the release string and the terms do not move."""
+    northgate.executor.unpriced = "failed"

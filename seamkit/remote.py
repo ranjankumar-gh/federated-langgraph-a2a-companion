@@ -99,6 +99,7 @@ from seamkit.ledger import (
     moved,
     observe,
     question_digest,
+    state_name,
     unanswered,
 )
 from seamkit.retry import NO_RETRY, RetryPolicy, refuse_retry, retrying
@@ -435,6 +436,9 @@ class RemoteAgentNode:
             if self._waits_for_us(task) and entry["state"] == "input-required":
                 reply = interrupt(question_of(task))  # asked only once it is recorded
                 task = await self._send(reply, entry)  # same task, same context
+            elif (self.breaker and entry["state"] != "failed"
+                  and state_name(task.status.state) == "failed"):
+                self.breaker.failed_later(seamkit.ledger.CLOCK())  # never sent: read
         seen = observe(entry, task, self.partner.release)
         if task.status.state == COMPLETED:
             answer = self._outcome(task)

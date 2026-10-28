@@ -1,0 +1,146 @@
+{
+  "seam": "repair_estimate",
+  "tests": [
+    {
+      "name": "CLM-R01: answered",
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-R01",
+        "damaged_parts": ["bumper", "door"]
+      },
+      "outcome": "answered",
+      "reads": {
+        "estimate": {
+          "type": "number",
+          "required": true,
+          "unit": "claim currency"
+        },
+        "notes": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "CLM-R02: asks photo_url",
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-R02",
+        "damaged_parts": ["frame"]
+      },
+      "outcome": "asks photo_url",
+      "reads": {}
+    },
+    {
+      "name": "CLM-R03: rejected",
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-R03",
+        "damaged_parts": ["mirror"]
+      },
+      "outcome": "rejected",
+      "reads": {}
+    },
+    {
+      "name": "CLM-R02: answered",
+      "skill": "estimate_repair",
+      "request": {
+        "photo_url": "https://claims.example.test/photos/CLM-R02.jpg",
+        "claim_id": "CLM-R02",
+        "damaged_parts": ["frame"]
+      },
+      "outcome": "answered",
+      "reads": {
+        "estimate": {
+          "type": "number",
+          "required": true,
+          "unit": "claim currency"
+        },
+        "notes": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "CLM-C01: answered",
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-C01",
+        "damaged_parts": ["bumper"]
+      },
+      "outcome": "answered",
+      "reads": {
+        "estimate": {
+          "type": "number",
+          "required": true,
+          "unit": "claim currency"
+        },
+        "notes": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "CLM-C02: answered",
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-C02",
+        "damaged_parts": ["door"]
+      },
+      "outcome": "answered",
+      "reads": {
+        "estimate": {
+          "type": "number",
+          "required": true,
+          "unit": "claim currency"
+        },
+        "notes": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "CLM-C03: answered",
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-C03",
+        "damaged_parts": ["bumper", "door"]
+      },
+      "outcome": "answered",
+      "reads": {
+        "estimate": {
+          "type": "number",
+          "required": true,
+          "unit": "claim currency"
+        },
+        "notes": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "CLM-C04: answered",
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-C04",
+        "damaged_parts": ["bumper", "bumper"]
+      },
+      "outcome": "answered",
+      "reads": {
+        "estimate": {
+          "type": "number",
+          "required": true,
+          "unit": "claim currency"
+        },
+        "notes": {
+          "type": "string",
+          "required": true
+        }
+      }
+    }
+  ]
+}

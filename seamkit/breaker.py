@@ -88,6 +88,15 @@ class SeamBreaker:
         late = error is None and elapsed > self.policy.late_seconds
         self.observe(late or (error is not None and issubclass(error, COUNTED)), now)
 
+    def failed_later(self, now: float) -> None:
+        """A task whose send returned before it finished has ended failed: count it.
+
+        Chapter 16: on a seam whose send returns once the task exists, the failure is
+        read, never sent, and `record` only ever saw an answer in time.
+        """
+        self.in_flight += 1  # the send's own outcome already took its place back
+        self.observe(True, now)
+
     def observe(self, failed: bool, now: float) -> None:
         self.in_flight = max(0, self.in_flight - 1)
         if self.trial_out:  # the trial decides, either way

@@ -1,0 +1,308 @@
+{
+  "seam": "repair_estimate",
+  "release": "v7.4",
+  "revision": "v7.4",
+  "card_digest": "sha256:0291cde8df5268a17d441108fbaba71cb71a84d3dddeeb8bf11e5e0238cfe6c6",
+  "behaviour": "bv:3ec17ceb844a",
+  "made_at": "2027-01-20",
+  "exchanges": [
+    {
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-R01",
+        "damaged_parts": ["bumper", "door"]
+      },
+      "state": "completed",
+      "artifact": {
+        "notes": "",
+        "estimate": 3000.0
+      },
+      "message": {},
+      "source": "recorded"
+    },
+    {
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-R02",
+        "damaged_parts": ["frame"]
+      },
+      "state": "input-required",
+      "artifact": {},
+      "message": {
+        "needs": "photo_url",
+        "why": "frame damage needs a photo"
+      },
+      "source": "recorded"
+    },
+    {
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-R03",
+        "damaged_parts": ["mirror"]
+      },
+      "state": "rejected",
+      "artifact": {},
+      "message": {},
+      "source": "recorded"
+    },
+    {
+      "skill": "estimate_repair",
+      "request": {
+        "photo_url": "https://claims.example.test/photos/CLM-R02.jpg",
+        "claim_id": "CLM-R02",
+        "damaged_parts": ["frame"]
+      },
+      "state": "completed",
+      "artifact": {
+        "notes": "",
+        "estimate": 6500.0
+      },
+      "message": {},
+      "source": "recorded"
+    },
+    {
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-C01",
+        "damaged_parts": ["bumper"]
+      },
+      "state": "completed",
+      "artifact": {
+        "notes": "",
+        "estimate": 1200.0
+      },
+      "message": {},
+      "source": "canary"
+    },
+    {
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-C02",
+        "damaged_parts": ["door"]
+      },
+      "state": "completed",
+      "artifact": {
+        "notes": "",
+        "estimate": 1800.0
+      },
+      "message": {},
+      "source": "canary"
+    },
+    {
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-C03",
+        "damaged_parts": ["bumper", "door"]
+      },
+      "state": "completed",
+      "artifact": {
+        "notes": "",
+        "estimate": 3000.0
+      },
+      "message": {},
+      "source": "canary"
+    },
+    {
+      "skill": "estimate_repair",
+      "request": {
+        "claim_id": "CLM-C04",
+        "damaged_parts": ["bumper", "bumper"]
+      },
+      "state": "completed",
+      "artifact": {
+        "notes": "",
+        "estimate": 2400.0
+      },
+      "message": {},
+      "source": "canary"
+    }
+  ],
+  "card": {
+    "name": "Northgate repair estimates",
+    "description": "Northgate repair estimates (Meridian claims federation)",
+    "supportedInterfaces": [
+      {
+        "url": "http://northgate.example.test/",
+        "protocolBinding": "JSONRPC",
+        "protocolVersion": "1.0"
+      }
+    ],
+    "version": "v7.4",
+    "capabilities": {
+      "streaming": false,
+      "pushNotifications": true,
+      "extensions": [
+        {
+          "uri": "urn:seamkit:seam-contract",
+          "description": "Seam contract terms, current revision first",
+          "params": {
+            "revisions": [
+              {
+                "effective": "2027-01-18",
+                "skew_seconds": 30.0,
+                "auth": ["mtls", "delegation"],
+                "revocation_seconds": 90.0,
+                "revision": "v7.4",
+                "accepts": ["claim", "vehicle"],
+                "skills": {
+                  "book_repair": {
+                    "key_seconds": 3600.0,
+                    "compensate_seconds": 259200.0,
+                    "p95_seconds": 2.0,
+                    "inputs": [
+                      {
+                        "name": "claim_id",
+                        "required": true,
+                        "type": "string"
+                      },
+                      {
+                        "name": "damaged_parts",
+                        "required": true,
+                        "type": "string[]"
+                      }
+                    ],
+                    "outputs": [
+                      {
+                        "name": "booking",
+                        "required": true,
+                        "type": "string"
+                      },
+                      {
+                        "name": "shop",
+                        "required": true,
+                        "type": "string"
+                      }
+                    ],
+                    "compensated_by": "cancel_booking"
+                  },
+                  "estimate_repair": {
+                    "cost_per_task": 3.5,
+                    "key_seconds": 3600.0,
+                    "p95_seconds": 4.0,
+                    "inputs": [
+                      {
+                        "name": "claim_id",
+                        "required": true,
+                        "type": "string"
+                      },
+                      {
+                        "name": "damaged_parts",
+                        "required": true,
+                        "type": "string[]"
+                      }
+                    ],
+                    "outputs": [
+                      {
+                        "name": "estimate",
+                        "required": true,
+                        "unit": "claim currency",
+                        "type": "number"
+                      },
+                      {
+                        "name": "notes",
+                        "required": true,
+                        "type": "string"
+                      }
+                    ],
+                    "asks": ["photo_url"]
+                  },
+                  "estimate_history": {
+                    "key_seconds": 3600.0,
+                    "p95_seconds": 2.0,
+                    "inputs": [
+                      {
+                        "name": "claim_id",
+                        "required": false,
+                        "type": "string"
+                      },
+                      {
+                        "name": "shop",
+                        "required": false,
+                        "type": "string"
+                      }
+                    ],
+                    "outputs": [
+                      {
+                        "name": "shop",
+                        "required": true,
+                        "type": "string"
+                      },
+                      {
+                        "name": "estimates",
+                        "required": true,
+                        "type": "object[]"
+                      }
+                    ],
+                    "cost_per_task": 0.5
+                  },
+                  "cancel_booking": {
+                    "p95_seconds": 2.0,
+                    "inputs": [
+                      {
+                        "name": "claim_id",
+                        "required": true,
+                        "type": "string"
+                      },
+                      {
+                        "name": "task",
+                        "required": true,
+                        "type": "string"
+                      }
+                    ],
+                    "outputs": [
+                      {
+                        "name": "outcome",
+                        "required": true,
+                        "type": "string"
+                      },
+                      {
+                        "name": "owed",
+                        "required": true,
+                        "unit": "claim currency",
+                        "type": "number"
+                      },
+                      {
+                        "name": "residue",
+                        "required": true,
+                        "type": "string"
+                      }
+                    ],
+                    "key_seconds": 3600.0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "defaultInputModes": ["application/json"],
+    "defaultOutputModes": ["application/json"],
+    "skills": [
+      {
+        "id": "estimate_repair",
+        "name": "estimate_repair",
+        "description": "List-price estimate for a claim's damaged parts",
+        "tags": ["meridian"]
+      },
+      {
+        "id": "estimate_history",
+        "name": "estimate_history",
+        "description": "Past estimates by the shop repairing a claim",
+        "tags": ["meridian"]
+      },
+      {
+        "id": "book_repair",
+        "name": "book_repair",
+        "description": "Book the repair at a network shop against the estimate",
+        "tags": ["meridian"]
+      },
+      {
+        "id": "cancel_booking",
+        "name": "cancel_booking",
+        "description": "Cancel a booking you made; anything owed is stated",
+        "tags": ["meridian"]
+      }
+    ]
+  }
+}

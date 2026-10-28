@@ -45,7 +45,7 @@ from seamkit.contract import Field, SeamTerms, SkillTerms, publish
 from seamkit.delegation import DelegationAuth, Grant, Guard, as_peer, inbound_chain
 from seamkit.errors import SeamError
 from seamkit.ingress import IngressRule
-from seamkit.remote import connect
+from seamkit.remote import CrossingRecord, connect
 from seamkit.revocation import RevocationSource, checked, checker
 from seamkit.server import GraphExecutor, a2a_app, agent_card, delegation_config
 from seamkit.tools import remote_skill_tool
@@ -205,6 +205,9 @@ class RiskPartner:
             to_input=lambda claim: {"claim": claim},
             to_artifact=self._artifact, configure=self._configure)
         self.history_breaker: SeamBreaker | None = None
+        # Chapter 16: Risk's own crossing records on its peer seam, which only Risk
+        # holds; Claims' records end at Risk.
+        self.records: list[CrossingRecord] = []
         if self.breaker is not None:
             self.history_breaker = SeamBreaker("estimate_history", "Northgate",
                                                "estimate_history", self.breaker)
@@ -249,7 +252,7 @@ class RiskPartner:
                 northgate.card, northgate.trust.covers)
             # The argument schema comes from Northgate's published input terms.
             self._tool = remote_skill_tool(northgate, "estimate_history", "Northgate",
-                                           log=lambda record: None,
+                                           log=self.records.append,
                                            rules=HISTORY_RULES,
                                            filtered=self.filtered,
                                            breaker=self.history_breaker)

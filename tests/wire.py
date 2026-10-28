@@ -16,10 +16,12 @@ from meridian.federated import SEAMS, A2APartners, build_a2a_graph, connect_part
 from meridian.identity import ADJUSTER_SESSION, CLAIMS_ISSUER, MeridianIssuer
 from meridian.inprocess import ClaimGraph, Node
 from meridian.review import Reader, keyword_reader
+from meridian.trust import MERIDIAN_TRUST
 from meridian.risk_server import RiskPartner
 from seamkit.delegation import as_peer
 from seamkit.push import PushTo
 from seamkit.remote import CrossingRecord, PartnerConnection, SeamSpec
+from seamkit.trust import PartnerTrust
 
 
 def thread(tid: str) -> RunnableConfig:
@@ -64,6 +66,8 @@ class Federation:
     connections: dict[str, PartnerConnection] = field(default_factory=dict)
     seams: Mapping[str, SeamSpec] = field(default_factory=lambda: SEAMS)
     issuer: MeridianIssuer = field(default_factory=lambda: CLAIMS_ISSUER)
+    # Chapter 16: the card trust policy; Claims' CI passes one that pins a stub's key
+    trust: Mapping[str, PartnerTrust] = field(default_factory=lambda: MERIDIAN_TRUST)
 
     async def graph(self, http: dict[str, httpx.AsyncClient] | None = None,
                     checkpointer: BaseCheckpointSaver[Any] | None = None,
@@ -76,7 +80,8 @@ class Federation:
         `review` and `reader` replace Claims' review node, or only its model.
         `bells` sends a seam's new tasks with a push config (Chapter 11)."""
         deployed = {**self.partners.apps(), **(apps or {})}
-        self.connections = await connect_partners(deployed, http, issuer=self.issuer)
+        self.connections = await connect_partners(deployed, http, issuer=self.issuer,
+                                                  trust=self.trust)
         return build_a2a_graph(self.connections, checkpointer,
                                log=self.records.append, seams=self.seams,
                                issuer=self.issuer, review=review, reader=reader,

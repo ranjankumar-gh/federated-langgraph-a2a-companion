@@ -244,6 +244,9 @@ class NorthgateExecutor(AgentExecutor):
         # Chapter 15: the price table behind estimate_repair. A model swap changes it
         # and nothing on the card (meridian.incident.swap_model).
         self.prices: dict[str, float] = dict(PART_PRICES)
+        # Chapter 16: what a part Northgate does not price comes back as. The terms say
+        # nothing about it; a code release moved it (meridian.incident.fail_unpriced).
+        self.unpriced = "rejected"
 
     async def execute(self, context: RequestContext, queue: EventQueue) -> None:
         assert context.message and context.task_id and context.context_id
@@ -279,6 +282,10 @@ class NorthgateExecutor(AgentExecutor):
             await updater.complete()
             return
         if not set(request["damaged_parts"]) <= set(self.prices):
+            if self.unpriced == "failed":  # parts validation moved behind the matcher
+                await updater.failed(updater.new_agent_message(
+                    [new_data_part({"error": "no price for a part"})]))
+                return
             await updater.reject()
             return
         frame = "frame" in request["damaged_parts"]

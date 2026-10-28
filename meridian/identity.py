@@ -61,6 +61,11 @@ CANARY_SESSION, CANARY_ONCALL = "session-canary", "oncall:claims-seams"
 GOLDEN_CLAIMS = frozenset({"CLM-C01", "CLM-C02", "CLM-C03", "CLM-C04",
                            "CLM-C11", "CLM-C12", "CLM-C13"})
 
+# Chapter 16: Claims' CI pipeline, whose runs send the reserved recording ids to the
+# partner stub and nothing else. Its caseload is those ids, as the canary's is hers.
+CI_SESSION, CI_PIPELINE = "session-ci", "service:claims-ci"
+RECORDED_CLAIMS = frozenset(f"CLM-R{n:02d}" for n in range(1, 10))
+
 # Chapter 13: Claims itself, when it undoes a step it took. Not a session: the issuer
 # mints this root only for a claim Claims names, and only for the compensating skills.
 COMPENSATOR = "service:compensator"
@@ -71,7 +76,8 @@ SESSIONS: dict[str, tuple[str, frozenset[str]]] = {
     MANAGER_SESSION: (MANAGER, frozenset()),
     LEAD_SESSION: (LEAD, frozenset()),
     RECONCILER_SESSION: (RECONCILER, frozenset()),
-    CANARY_SESSION: (CANARY_ONCALL, GOLDEN_CLAIMS)}
+    CANARY_SESSION: (CANARY_ONCALL, GOLDEN_CLAIMS),
+    CI_SESSION: (CI_PIPELINE, RECORDED_CLAIMS)}
 
 # Each person's role, as Meridian's directory records it: an approval states it.
 ROLES: dict[str, str] = {ADJUSTER: "claims/adjuster",
