@@ -9,7 +9,8 @@ card (is it the one the task was sent under, or one with the same terms for the
 skill?), and the question (is it the one that was asked?).
 
 `wake` starts a run on a thread whose task changed, and never writes into one with a
-run in flight. `sweep` is the polling loop that calls it until a push receiver does.
+run in flight. `sweep` is the polling loop that calls it. Since Chapter 11 a push
+receiver calls `wake` as the trigger, and the sweep stays as the backstop under it.
 `fork` carries the head's ledger into a fork of a thread, so time travel on the
 caller's side never sends a task the partner has already run.
 """
@@ -139,8 +140,9 @@ async def sweep(graph: Any, threads: Mapping[str, RunnableConfig],
                 running: MutableSet[str]) -> dict[str, str]:
     """Read every paused task the ledger records; wake each thread whose task moved.
 
-    The poller a push receiver replaces. It reads the partner's task, never the
-    partner's checkpoint, and writes nothing itself: the run it starts does.
+    The poller, kept under push as the backstop (Chapter 11). It reads the partner's
+    task, never the partner's checkpoint, and writes nothing itself: the run it starts
+    does. A seam with no node in `nodes` is skipped, so each backstop sweeps its own.
     """
     woken: dict[str, str] = {}
     for thread, config in threads.items():
@@ -149,6 +151,8 @@ async def sweep(graph: Any, threads: Mapping[str, RunnableConfig],
             continue  # waiting on a Claims person: that person's answer resumes it
         ledger: Mapping[str, LedgerEntry] = snapshot.values.get("ledger", {})
         for seam, entry in ledger.items():
+            if seam not in nodes:  # a backstop sweeps its own seam (Chapter 11)
+                continue
             if entry["state"] not in PAUSED or not entry["task_id"]:
                 continue
             with as_thread(config):

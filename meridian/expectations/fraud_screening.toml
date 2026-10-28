@@ -7,6 +7,7 @@ answers = ["police_report"]  # a Claims adjuster answers it
 auth = ["mtls", "delegation"]
 skew_seconds = 30
 slo_seconds = 10.0
+delivery = "stream"  # a blocking send: one answer, seconds long
 
 [reads.fraud_score]
 into = "fraud_score"

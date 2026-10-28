@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from a2a.server.context import ServerCallContext
 
 from a2a.helpers import get_data_parts, new_data_part, new_task_from_user_message
@@ -28,13 +29,24 @@ from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import Event, EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
-from a2a.server.tasks import InMemoryTaskStore, TaskManager, TaskStore, TaskUpdater
+from a2a.server.tasks import (
+    BasePushNotificationSender,
+    InMemoryPushNotificationConfigStore,
+    InMemoryTaskStore,
+    PushNotificationSender,
+    TaskManager,
+    TaskStore,
+    TaskUpdater,
+)
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentExtension,
     AgentInterface,
     AgentSkill,
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskStatusUpdateEvent,
 )
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from jwt.algorithms import OKPAlgorithm
@@ -64,10 +76,12 @@ def delegation_config(call: ServerCallContext) -> dict[str, Any]:
 
 
 def agent_card(name: str, url: str, release: str, skills: Mapping[str, str],
-               extensions: Sequence[AgentExtension] = ()) -> AgentCard:
+               extensions: Sequence[AgentExtension] = (),
+               push: bool = False) -> AgentCard:
     """A minimal card: one JSON-RPC interface, no streaming, one entry per skill.
 
     `extensions` carries what the protocol has no field for, such as seam terms.
+    `push` says the partner can send push notifications (Chapter 11).
     """
     return AgentCard(
         name=name,
@@ -75,7 +89,8 @@ def agent_card(name: str, url: str, release: str, skills: Mapping[str, str],
         version=release,
         supported_interfaces=[AgentInterface(
             protocol_binding="JSONRPC", protocol_version="1.0", url=url)],
-        capabilities=AgentCapabilities(streaming=False, extensions=list(extensions)),
+        capabilities=AgentCapabilities(streaming=False, push_notifications=push,
+                                       extensions=list(extensions)),
         default_input_modes=["application/json"],
         default_output_modes=["application/json"],
         skills=[AgentSkill(id=sid, name=sid, description=text, tags=["meridian"])
@@ -83,17 +98,29 @@ def agent_card(name: str, url: str, release: str, skills: Mapping[str, str],
     )
 
 
+def push_sender(http: httpx.AsyncClient) -> tuple[
+        InMemoryPushNotificationConfigStore, PushNotificationSender]:
+    """The SDK's push config store and sender: one POST per event, no retry."""
+    configs = InMemoryPushNotificationConfigStore()
+    return configs, BasePushNotificationSender(http, configs)
+
+
 def a2a_app(card: AgentCard, executor: AgentExecutor,
             extra: Sequence[BaseRoute] = (),
-            store: TaskStore | None = None) -> Starlette:
+            store: TaskStore | None = None,
+            push: tuple[InMemoryPushNotificationConfigStore,
+                        PushNotificationSender] | None = None) -> Starlette:
     """A Starlette app serving the card and the JSON-RPC endpoint at the card's URL.
 
     `extra` adds routes beside them, such as the key set a card's signature names.
     `store` is the task store, when the partner also writes tasks outside a request.
+    `push` is the push config store and sender (Chapter 11); without it a push config
+    on a send is ignored, and nobody is ever rung.
     """
+    configs, sender = push or (None, None)
     handler = DefaultRequestHandler(
         agent_executor=executor, task_store=store or InMemoryTaskStore(),
-        agent_card=card)
+        agent_card=card, push_config_store=configs, push_sender=sender)
     routes = [*create_agent_card_routes(card), *extra,
               *create_jsonrpc_routes(handler, "/")]
     return Starlette(routes=routes)
@@ -133,14 +160,21 @@ class StoreWriter(EventQueue):
     """A queue with no request behind it: each event goes straight to the task store.
 
     The SDK's way to run an executor's updates outside the framework is a subclass.
+    The SDK pushes from a request's event consumer, so a write from here pushes
+    nothing unless `push` is given (Chapter 11).
     """
 
-    def __init__(self, store: TaskStore, task_id: str, context_id: str) -> None:
+    def __init__(self, store: TaskStore, task_id: str, context_id: str,
+                 push: PushNotificationSender | None = None) -> None:
         self.manager = TaskManager(store, ServerCallContext(), task_id, context_id,
                                    None)
+        self.task_id, self.push = task_id, push
 
     async def enqueue_event(self, event: Event) -> None:
         await self.manager.process(event)
+        if self.push and isinstance(event, (Task, TaskStatusUpdateEvent,
+                                            TaskArtifactUpdateEvent)):
+            await self.push.send_notification(self.task_id, event)
 
 
 class GraphExecutor(AgentExecutor):
@@ -162,6 +196,7 @@ class GraphExecutor(AgentExecutor):
         self.configure = configure
         self.own, self.store = own, store or InMemoryTaskStore()
         self.now = now
+        self.push: PushNotificationSender | None = None  # rings from the inbox too
         self.waiting: dict[str, Waiting] = {}  # task -> a question for our own people
         self.held: dict[str, Any] = {}  # task -> an answer waiting on a fresh chain
         # The partner's own log of what it was asked: one entry per execution.
@@ -238,8 +273,8 @@ class GraphExecutor(AgentExecutor):
         If not, the answer is kept and the task asks the caller for a fresh chain.
         """
         waiting = self.waiting.pop(task_id)
-        updater = TaskUpdater(StoreWriter(self.store, task_id, waiting.context_id),
-                              task_id, waiting.context_id)
+        updater = TaskUpdater(StoreWriter(self.store, task_id, waiting.context_id,
+                                          self.push), task_id, waiting.context_id)
         why = holds(waiting.config) if holds else "ok"
         if why == "revoked":  # final: Chapter 7's rule at the commit act point
             await updater.cancel(updater.new_agent_message(

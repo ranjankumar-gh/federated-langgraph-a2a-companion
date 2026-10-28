@@ -21,7 +21,7 @@ estimate and the payment. It is Claims' own, so it is not a seam.
 """
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -42,6 +42,7 @@ from northgate.server import NORTHGATE_URL, NorthgatePartner
 from seamkit.contract import Expectations, load_expectations, seam_spec
 from seamkit.delegation import DelegationAuth, Grant, as_peer, chain_id
 from seamkit.inventory import SeamInventory
+from seamkit.push import PushTo
 from seamkit.trust import PartnerTrust
 from seamkit.remote import (
     CrossingRecord,
@@ -50,6 +51,7 @@ from seamkit.remote import (
     SeamSpec,
     connect,
     log_crossing,
+    no_push,
 )
 
 EXPECTED = Path(__file__).parent / "expectations"
@@ -191,15 +193,30 @@ def a2a_workers(connections: Mapping[str, PartnerConnection],
                 seams: Mapping[str, SeamSpec] = SEAMS,
                 issuer: MeridianIssuer = CLAIMS_ISSUER,
                 gates: bool = True,
+                bells: Mapping[str, PushTo] | None = None,
                 ) -> dict[str, RemoteAgentNode]:
     """One node per seam. Since Chapter 7 each has the resume gate in front of it;
-    `gates=False` builds Chapter 6's nodes, which never re-check a recorded task."""
+    `gates=False` builds Chapter 6's nodes, which never re-check a recorded task.
+    `bells` gives a seam the push config its new tasks are sent with (Chapter 11)."""
     authority = partial(run_chain_id, issuer)
+    rung = bells or {}
     if not gates:
-        return {name: RemoteAgentNode(spec, connections[name], log, authority)
+        return {name: RemoteAgentNode(spec, connections[name], log, authority,
+                                      rung.get(name, no_push))
                 for name, spec in seams.items()}
     return {name: ResumeGate(spec, connections[name], log, authority,
-                             policy=MERIDIAN_POLICY, issuer=issuer)
+                             rung.get(name, no_push), policy=MERIDIAN_POLICY,
+                             issuer=issuer)
+            for name, spec in seams.items()}
+
+
+def push_seams(seams: Mapping[str, SeamSpec] = SEAMS,
+               expects: Mapping[str, Expectations] = EXPECTATIONS,
+               ) -> dict[str, SeamSpec]:
+    """Chapter 11: a push seam's send returns once the task exists; the bell does the
+    rest. The earlier chapters' federation keeps the blocking send on every seam."""
+    return {name: replace(spec, return_immediately=True)
+            if expects[name].delivery == "push" else spec
             for name, spec in seams.items()}
 
 
@@ -221,9 +238,10 @@ def build_a2a_graph(connections: Mapping[str, PartnerConnection],
                     gates: bool = True,
                     review: Node | None = None,
                     reader: Reader = keyword_reader,
+                    bells: Mapping[str, PushTo] | None = None,
                     ) -> ClaimGraph:
     """`review` replaces the review node (the incident's); `reader` is its model."""
-    nodes = a2a_workers(connections, log, seams, issuer, gates)
+    nodes = a2a_workers(connections, log, seams, issuer, gates, bells)
     return build_graph(with_review(nodes, review or reviewer(reader)), checkpointer)
 
 
@@ -264,4 +282,4 @@ __all__ = ["EXPECTATIONS", "GRANTS", "with_authority", "with_contract", "with_tr
            "OWNERS_A2A",
            "SEAMS", "A2APartners",
            "CrossingRecord", "build_a2a_graph",
-           "connect_partners", "in_process_http"]
+           "connect_partners", "in_process_http", "push_seams"]

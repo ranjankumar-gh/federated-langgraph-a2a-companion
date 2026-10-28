@@ -101,6 +101,10 @@ class Expectations:
     # longest Claims waits on a partner's people; () keeps Chapter 3's rule
     roles: tuple[str, ...] = ()
     wait_seconds: int | None = None
+    # Chapter 11: how Claims hears that a task moved (a row of seamkit.delivery.MODES),
+    # and how often a backstop poll reads a task a push may have been lost for
+    delivery: str = "stream"
+    backstop_seconds: int | None = None
     # Chapter 8: artifact key -> how a read is closed (pattern, choices, items) or
     # capped (max_chars); seamkit.ingress turns these into the seam's ingress rules.
     ingress: Mapping[str, Mapping[str, Any]] = dc_field(default_factory=dict)
@@ -321,7 +325,10 @@ def load_expectations(path: Path) -> Expectations:
         ingress={key: {k: v for k, v in spec.items() if k in INGRESS_KEYS}
                  for key, spec in reads.items()},
         roles=tuple(raw.get("roles", [])),
-        wait_seconds=int(raw["wait_seconds"]) if "wait_seconds" in raw else None)
+        wait_seconds=int(raw["wait_seconds"]) if "wait_seconds" in raw else None,
+        delivery=str(raw.get("delivery", "stream")),
+        backstop_seconds=(int(raw["backstop_seconds"])
+                          if "backstop_seconds" in raw else None))
 
 
 # The keys of a [reads.*] table the ingress filter reads (Chapter 8); the shape check

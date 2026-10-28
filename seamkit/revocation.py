@@ -107,6 +107,16 @@ class RevocationSource:
     latest: RevocationList | None = None
     pulled_at: float = float("-inf")
     pulls: list[float] = field(default_factory=list)  # when each good pull happened
+    gap: float = 5.0  # Chapter 11: the least time between two doorbell pulls
+
+    def ring(self, now: float) -> None:
+        """A doorbell (Chapter 11): pull now, whatever the cadence, with every check.
+
+        Nothing the ring carries is read. A forged ring costs one fetch of the real
+        list, and a flood of them costs one fetch per `gap`.
+        """
+        if now - self.pulled_at >= self.gap:
+            self._pull(now)
 
     def current(self, now: float) -> RevocationList:
         """The list to check against now, or a refusal: never a stale copy."""

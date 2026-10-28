@@ -24,21 +24,37 @@ Chapter 8's incident is naive_reviewer below: one model reads the whole claim an
 shop's notes, and writes the memo Finance prints. A note that addresses "automated
 claim reviewers" gets Meridian's fraud view into the memo. The seam ingress filter
 (seamkit.ingress) and the quarantined reader (meridian.review) are the fix.
+
+Chapter 11's incident is letter_receiver below: the push receiver a webhook example
+suggests. It checks one token for the whole seam, records the pushed state in the
+ledger through `observe`, and wakes the thread. The body becomes state, so whoever holds
+the token writes the ledger. The doorbell receiver (seamkit.push) is the fix.
 """
 
+import json
 from collections.abc import Callable, Generator, Mapping
 from typing import Any
 
 import httpx
 from a2a.client import ClientCallContext
 from a2a.helpers import get_data_parts, new_data_message
-from a2a.types import Role, SendMessageRequest, Task, TaskState
+from a2a.types import Role, SendMessageRequest, StreamResponse, Task, TaskState
+from google.protobuf import json_format
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from meridian.identity import MeridianIssuer
 from meridian.inprocess import ClaimState, Node
 from seamkit.delegation import as_peer, run_value
+from seamkit.errors import StaleLedgerWrite
 from seamkit.ingress import derive
+from seamkit.ledger import observe
+from seamkit.push import TOKEN_HEADER
+from seamkit.resume import wake
 from seamkit.remote import PartnerConnection, RemoteAgentNode, connect, question_of
 from seamkit.revocation import RevocationList
 
@@ -185,3 +201,35 @@ def naive_reviewer(model: Model) -> Node:
         return update
 
     return review_estimate
+
+
+def pushed_task(body: bytes) -> Task:
+    """The task a push body describes. The letter receiver's mistake is believing it."""
+    event = json_format.ParseDict(json.loads(body), StreamResponse(),
+                                  ignore_unknown_fields=True)
+    if event.HasField("task"):
+        return event.task
+    update = event.status_update
+    return Task(id=update.task_id, context_id=update.context_id, status=update.status)
+
+
+def letter_receiver(token: str, graph: Any, configs: Callable[[str], RunnableConfig],
+                    release: str, running: set[str]) -> Starlette:
+    """POST /push/{thread}/{seam}: one token per seam, and the pushed state recorded."""
+
+    async def receive(request: Request) -> JSONResponse:
+        if request.headers.get(TOKEN_HEADER, "") != token:
+            return JSONResponse({"verdict": "token"}, status_code=401)
+        thread, seam = request.path_params["thread"], request.path_params["seam"]
+        task = pushed_task(await request.body())
+        config = configs(thread)
+        try:  # the push body, written into the ledger as if the partner had said it
+            entry = (await graph.aget_state(config)).values["ledger"][seam]
+            await graph.aupdate_state(config, {"ledger": {
+                seam: observe(entry, task, release)}})
+        except StaleLedgerWrite as exc:
+            return JSONResponse({"verdict": exc.detail}, status_code=409)
+        woken = await wake(graph, config, running)
+        return JSONResponse({"verdict": "recorded", "woken": woken})
+
+    return Starlette(routes=[Route("/push/{thread}/{seam}", receive, methods=["POST"])])

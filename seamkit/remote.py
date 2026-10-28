@@ -34,7 +34,7 @@ from a2a.client import A2ACardResolver, Client, ClientCallContext, ClientConfig
 from a2a.client import A2AClientError, ClientFactory
 from a2a.helpers import get_data_parts, new_data_message
 from a2a.types import AgentCard, GetTaskRequest, Role, SendMessageConfiguration
-from a2a.types import SendMessageRequest, Task, TaskState
+from a2a.types import SendMessageRequest, Task, TaskPushNotificationConfig, TaskState
 from a2a.utils.errors import A2AError
 from langgraph.types import interrupt
 
@@ -300,6 +300,11 @@ def addressee(task: Task) -> str:
     return str(said.get("to") or said.get("waiting_on") or "")
 
 
+def no_push(seam: str, key: str | None) -> TaskPushNotificationConfig | None:
+    """A seam nobody rings for: the caller reads the task when it next runs."""
+    return None
+
+
 @dataclass
 class RemoteAgentNode:
     """The node call shape: one partner skill, one task, an update or a SeamError."""
@@ -309,6 +314,9 @@ class RemoteAgentNode:
     log: Callable[[CrossingRecord], None] = field(default=log_crossing)
     # Names the authority a task is sent under, never its value: the run's chain id.
     authority: Callable[[], str] = field(default=lambda: "")
+    # Chapter 11: the push config a new task is sent with (seamkit.push.PushTo).
+    push: Callable[[str, str | None], TaskPushNotificationConfig | None] = field(
+        default=no_push)
 
     async def __call__(self, state: Mapping[str, Any]) -> dict[str, Any]:
         name = self.seam.name
@@ -420,7 +428,9 @@ class RemoteAgentNode:
         # A2A messages carry no skill field; the skill id travels in metadata.
         message.metadata.update({"skill": self.seam.skill})
         request = SendMessageRequest(message=message, configuration=(
-            SendMessageConfiguration(return_immediately=self.seam.return_immediately)))
+            SendMessageConfiguration(
+                return_immediately=self.seam.return_immediately,
+                task_push_notification_config=self.push(self.seam.name, key))))
         record = self._record("send", tuple(data), key or "")
         task: Task | None = None
         try:

@@ -9,6 +9,8 @@ wait_seconds = 259200  # 72 h: the longest Claims waits on Finance's own people
 auth = ["mtls", "delegation"]
 skew_seconds = 30
 slo_seconds = 10.0
+delivery = "push"  # Finance's approvers take hours or days
+backstop_seconds = 3600  # one read an hour: 72 over the 72-hour wait horizon
 
 [reads.payment_ref]
 into = "payment_ref"

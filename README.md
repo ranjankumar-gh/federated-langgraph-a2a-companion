@@ -204,6 +204,30 @@ Run only this chapter's tests with `uv run pytest tests/test_ch08_ingress.py`.
 
 Run only this chapter's tests with `uv run pytest tests/test_ch10_resume.py`.
 
+### Chapter 11: Long-Running Tasks: Streaming, Push, and Polling
+
+- `seamkit/delivery.py`: the delivery-mode matrix (`MODES`) and `uncovered`, which refuses a
+  seam with no mode, a push seam with no backstop, a backstop as slow as the wait horizon, and
+  a push seam whose partner's card cannot push. Each expectations file names its `delivery`
+  and `backstop_seconds`.
+- `seamkit/push.py`: the per-task `push_token`, `PushTo` (the push config a send carries), the
+  verified `receiver`, `WakeQueue` (one pending wake per thread, never during a run), the
+  `Backstop` poll, and the `doorbell` app.
+- `seamkit/remote.py`: `RemoteAgentNode` gains `push`; `_send` sets the push config.
+  `seamkit/resume.py`: `sweep` skips a seam it has no node for.
+- `seamkit/server.py`: `agent_card(push=...)`, `a2a_app(push=...)` with the SDK's push config
+  store and sender, and `StoreWriter(push=...)`, which rings after a write from outside a
+  request. `seamkit/revocation.py`: `RevocationSource.ring`.
+- `northgate/server.py`: Northgate pushes, and serves Meridian's revocation doorbell at
+  `/revocations`. `meridian/finance_server.py`: Finance pushes, from its inbox too.
+- `meridian/federated.py`: `push_seams` and the `bells` argument. `meridian/incident.py`:
+  `letter_receiver`, the opening incident's receiver.
+- `tests/test_ch11_delivery.py`: the incident, a forged push with a real token, per-task tokens,
+  coalescing, the rate limit, a lost push found by the backstop, a dropped stream, the
+  revocation doorbell, Finance's inbox, and matrix coverage.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch11_delivery.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

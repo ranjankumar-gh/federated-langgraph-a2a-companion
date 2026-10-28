@@ -26,6 +26,8 @@ Northgate's.
 
 import asyncio
 import time
+
+import httpx
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
@@ -46,7 +48,8 @@ from seamkit.contract import Field, SeamTerms, SkillTerms, publish
 from seamkit.delegation import Guard, Trust, Verified, peer_of
 from seamkit.cards import jwk, sign_card
 from seamkit.revocation import ActPoint, RevocationSource, checker, still_holds
-from seamkit.server import a2a_app, agent_card, key_set_route
+from seamkit.push import doorbell
+from seamkit.server import a2a_app, agent_card, key_set_route, push_sender
 
 NORTHGATE_URL = "http://northgate.example.test/"
 
@@ -57,6 +60,7 @@ NORTHGATE_KID = "northgate-cards-2026-06"
 NORTHGATE_SIGNING_KEY = Ed25519PrivateKey.generate()
 NORTHGATE_PUBLIC_JWK = jwk(NORTHGATE_SIGNING_KEY.public_key())
 KEY_SET_PATH = "/.well-known/jwks.json"
+DOORBELL_PATH = "/revocations"  # Chapter 11: Meridian's issuer rings it after a list
 
 # Northgate's terms. Northgate owns them; Meridian's code only reads them off the card.
 ESTIMATE_REPAIR = SkillTerms(
@@ -303,7 +307,27 @@ def northgate_card(release: str, revisions: Sequence[SeamTerms],
     if books:
         skills["book_repair"] = "Book the repair at a network shop against the estimate"
     return agent_card("Northgate repair estimates", NORTHGATE_URL, release, skills,
-                      extensions=[publish(*revisions)] if revisions else [])
+                      extensions=[publish(*revisions)] if revisions else [], push=True)
+
+
+@dataclass
+class Doorway:
+    """Routes a fixed path to its own app, outside the guard; everything else to `app`.
+
+    A doorbell carries no chain, and needs none: it only makes Northgate pull a list
+    from the issuer's fixed URL, checked with the key Northgate already pinned.
+    """
+
+    app: ASGIApp
+    doors: Mapping[str, ASGIApp]
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        http = scope["type"] == "http"
+        door = self.doors.get(scope.get("path", "")) if http else None
+        if door is None:
+            await self.app(scope, receive, send)
+            return
+        await door({**scope, "path": "/", "raw_path": b"/"}, receive, send)
 
 
 @dataclass(frozen=True)
@@ -359,6 +383,9 @@ class NorthgatePartner:
     # Chapter 8: shop notes by claim (None is SHOP_NOTES), and shop remarks on history
     notes: Mapping[str, str] | None = None
     remarks: Mapping[str, str] | None = None
+    # Chapter 11: the client the SDK's push sender posts with (None: nobody is rung),
+    # and Meridian's revocation doorbell, mounted beside the A2A endpoint
+    push: httpx.AsyncClient | None = None
     executor: NorthgateExecutor = field(init=False)
 
     def __post_init__(self) -> None:
@@ -376,8 +403,16 @@ class NorthgatePartner:
                       NORTHGATE_URL.rstrip("/") + KEY_SET_PATH)
         inner = a2a_app(self.card, self.executor, [
             key_set_route(KEY_SET_PATH,
-                          {NORTHGATE_KID: NORTHGATE_SIGNING_KEY.public_key()})])
+                          {NORTHGATE_KID: NORTHGATE_SIGNING_KEY.public_key()})],
+            push=push_sender(self.push) if self.push else None)
         self.guard = Guard(inner, "northgate", TRUSTS, now=self.now,
                            revoked=checker(sources) if sources else None)
-        self.app: ASGIApp = self.guard if self.verifies_chains else TokenCheck(inner)
+        front: ASGIApp = self.guard if self.verifies_chains else TokenCheck(inner)
+        self.sources = sources
+        self.app: ASGIApp = Doorway(front, {DOORBELL_PATH: doorbell(self.ring)})
+
+    def ring(self) -> None:
+        """Meridian's issuer signed a new list: pull it now, through the same checks."""
+        for source in self.sources.values():
+            source.ring(self.now())
 

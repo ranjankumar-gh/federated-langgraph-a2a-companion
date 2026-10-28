@@ -8,6 +8,8 @@ auth = ["mtls", "delegation"]
 skew_seconds = 30
 revocation_seconds = 120  # the longest a revoked chain may act at Northgate
 slo_seconds = 10.0
+delivery = "push"  # the assessor desk takes about 21 minutes on frame damage
+backstop_seconds = 300  # a lost push is found within five minutes
 
 [reads.estimate]
 into = "repair_estimate"

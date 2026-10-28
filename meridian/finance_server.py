@@ -17,6 +17,8 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, TypedDict, cast
 
+import httpx
+
 from a2a.types import AgentCard
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.runnables import RunnableConfig
@@ -33,7 +35,7 @@ from seamkit.delegation import Guard, Verified, chain_id
 from seamkit.errors import SeamError
 from seamkit.ledger import question_digest
 from seamkit.revocation import RevocationSource, checker, still_holds
-from seamkit.server import GraphExecutor, a2a_app, agent_card, ask
+from seamkit.server import GraphExecutor, a2a_app, agent_card, ask, push_sender
 
 FINANCE_URL = "http://finance.meridian.test/"
 
@@ -89,7 +91,7 @@ def finance_card(release: str) -> AgentCard:
     """Finance's card for one release, as Finance's pipeline builds and publishes it."""
     return agent_card("Finance payments", FINANCE_URL, release,
                       {"pay_claim": "Pay a claim against its estimate"},
-                      extensions=[publish(TERMS[release])])
+                      extensions=[publish(TERMS[release])], push=True)
 
 
 # Finance's pipeline publishes each release's card digest with the release.
@@ -105,6 +107,8 @@ class FinancePartner:
     now: Callable[[], float] = time.time
     # Chapter 10: False deploys 2026.12 as it first shipped, with bare interrupts
     addressed: bool = True
+    # Chapter 11: the client the push sender posts with; None rings nobody
+    push: httpx.AsyncClient | None = None
 
     def __post_init__(self) -> None:
         sources = (revocation_sources() if self.revocations is None
@@ -129,6 +133,10 @@ class FinancePartner:
             to_input=self._received,
             to_artifact=self._paid,
             own="finance" if self.addressed else "", now=self.now)
+        # One push config store across releases, like the task store; the inbox rings
+        # through the same sender, because a write from outside a request pushes nothing
+        self.pushing = push_sender(self.push) if self.push else None
+        self.executor.push = self.pushing[1] if self.pushing else None
         # The guard's task bindings outlive any one release's app.
         self.bound: dict[str, tuple[str, str]] = {}
         self.holders: dict[str, str] = {}
@@ -138,7 +146,8 @@ class FinancePartner:
         """Deploy a release's card. Open tasks keep running on the same graph and store,
         and the guard keeps the tasks it has bound to a person and a claim."""
         self.release, self.card = release, finance_card(release)
-        inner = a2a_app(self.card, self.executor, store=self.executor.store)
+        inner = a2a_app(self.card, self.executor, store=self.executor.store,
+                        push=self.pushing)
         self.guard = Guard(inner, "finance", MERIDIAN_TRUSTS, now=self.now,
                            revoked=checker(self.sources), tasks=self.bound,
                            holders=self.holders)
