@@ -1,6 +1,5 @@
-# Template for .github/workflows/ci.yml in a book's companion repo.
-# Copied at bootstrap; replace <PYTHON_VERSIONS> with the book's tested-version matrix
-# from the manifest's `stack:` block (for example ["3.12", "3.13"]).
+# Continuous integration for the companion repo. The matrix below lists the Python
+# versions the project supports.
 #
 # Kept minimal on purpose: it runs exactly what every increment already runs locally,
 # the tests and the type check, so a green tag means the same thing on a reader's

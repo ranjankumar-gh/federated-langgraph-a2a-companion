@@ -15,6 +15,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from a2a.types import TaskState
+
 if TYPE_CHECKING:
     from seamkit.remote import CrossingRecord
 
@@ -22,6 +24,9 @@ if TYPE_CHECKING:
 CLAIMS_REFUSED = frozenset({"BreakerOpen", "CardUntrusted", "ContractBreach",
                             "BehaviourDrift", "DelegationRefused", "UntrustedEgress",
                             "BudgetSpent"})  # Chapter 18: Claims stopped paying
+
+# The state name a crossing record carries for a task the partner failed.
+FAILED = TaskState.Name(TaskState.TASK_STATE_FAILED)
 
 
 @dataclass(frozen=True)
@@ -57,7 +62,7 @@ def burn(seam: str, slo: SeamSLO, records: Sequence["CrossingRecord"],
     """The window's error budget, spent by sends the partner answered badly."""
     sent = [r for r in records if r.seam == seam and r.call == "send"
             and now - r.at <= slo.window_seconds and r.error not in CLAIMS_REFUSED]
-    bad = sum(1 for r in sent if r.error or r.state == "TASK_STATE_FAILED"
+    bad = sum(1 for r in sent if r.error or r.state == FAILED
               or (r.seconds or 0.0) > slo.seconds)
     return Budget(seam, len(sent), bad, (1 - slo.target) * len(sent))
 

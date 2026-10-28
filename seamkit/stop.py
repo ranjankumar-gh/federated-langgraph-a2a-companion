@@ -49,7 +49,7 @@ class PartnerStops:
 
     async def stop(self, stop: Stop, queue: WakeQueue,
                    threads: Iterable[str]) -> list[str]:
-        """Close the forward door to one owner, and ring every thread with work there."""
+        """Close the forward door to one owner; ring every thread with work there."""
         self.stopped[stop.owner] = stop
         seams = [s for s, b in self.breakers.items() if b.owner == stop.owner]
         for seam in seams:  # no send opens work at the owner from here on

@@ -80,7 +80,7 @@ def answered(task: Task) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class ReceiptHalf:
-    """One owner's signed statement of one crossing. Both halves name the same things."""
+    """One owner's signed statement of one crossing; both halves name the same."""
 
     skill: str
     task_id: str
@@ -178,7 +178,8 @@ def close(ours: ReceiptHalf, task: Task, pinned: Mapping[str, Ed25519PublicKey],
     theirs = half_of(task)
     if theirs is None:
         if countersigned:  # the terms promise a half, and none came
-            raise ReceiptMismatch(seam, "the answer carries no countersignature", task.id)
+            raise ReceiptMismatch(seam, "the answer carries no countersignature",
+                                  task.id)
         return None
     key = pinned.get(theirs.signer)
     if key is None or not theirs.verifies(key):

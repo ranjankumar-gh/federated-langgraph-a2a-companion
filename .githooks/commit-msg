@@ -2,9 +2,7 @@
 # commit-msg: block tool attribution from this repo's history.
 #
 # This repo is published under the author's name and readers clone it, so the
-# byline is theirs alone. The rk-book-gen and rk-book-companion-codebase-builder
-# skills both carry this rule, but a skill only applies if it is loaded in that
-# session. This hook applies always.
+# byline is theirs alone. This hook applies to every commit.
 #
 # WHY commit-msg AND NOT pre-commit. Git passes the message file only to
 # commit-msg. The earlier version of this check was installed as pre-commit and
