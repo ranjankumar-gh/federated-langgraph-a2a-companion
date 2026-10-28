@@ -14,10 +14,12 @@ codebase exactly as it stood at the end of that chapter:
 git checkout <slug>
 ```
 
-Chapter 2's tag is the one exception to reading order. Its cost test measures `policy_lookup`
-behind the A2A wire, so the Chapter 2 tag already contains the wire Chapter 3 builds
-(`seamkit/remote.py`, `seamkit/server.py`, the partner servers) and the task ledger Chapter 9
-introduces. Chapter 2's text says so where it borrows them.
+Each tag builds on the one before it, in reading order, with two borrowings. Chapter 2's cost
+test measures `policy_lookup` behind the A2A wire, so the Chapter 2 tag already contains the wire
+Chapter 3 builds (`seamkit/remote.py`, `seamkit/server.py`, the partner servers). Chapter 7's
+revocation drill needs a task that outlives the call that sent it, so the Chapter 7 tag already
+contains the task ledger Chapter 9 introduces (`seamkit/ledger.py`). Each chapter's text says so
+where it borrows.
 
 ## Running the tests
 
