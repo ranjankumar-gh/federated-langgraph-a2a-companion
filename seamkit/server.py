@@ -27,7 +27,7 @@ import json
 import time
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -54,6 +54,7 @@ from a2a.types import (
     AgentExtension,
     AgentInterface,
     AgentSkill,
+    GetTaskRequest,
     Message,
     SendMessageRequest,
     Task,
@@ -62,7 +63,10 @@ from a2a.types import (
 )
 from a2a.utils.errors import InvalidParamsError
 from a2a.utils.task import apply_history_length
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 from jwt.algorithms import OKPAlgorithm
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
@@ -75,6 +79,9 @@ from starlette.routing import BaseRoute, Route
 from seamkit.contract import terms_of
 from seamkit.delegation import Verified
 from seamkit.errors import SeamError
+from seamkit.ledger import state_name
+from seamkit.receipt import NONCE, RECEIPT_URI, ReceiptHalf, answered, digest
+from seamkit.tracing import served
 
 AnyGraph = CompiledStateGraph[Any, Any, Any, Any]
 
@@ -160,8 +167,73 @@ def key_windows(card: AgentCard) -> dict[str, int]:
     return {sid: s.key_seconds for sid, s in held.items() if s.key_seconds is not None}
 
 
+@dataclass(frozen=True)
+class Arrived:
+    """What a caller's message carried on one task, as the partner received it."""
+
+    skill: str
+    nonce: str
+    sent: str  # digest of the data under the nonce
+    fields: tuple[str, ...]
+
+
+@dataclass
+class Countersigner:
+    """The partner's half of a seam receipt, cut as an answer leaves (Chapter 17).
+
+    It hashes what arrived before the executor sees it, and what goes back as it
+    leaves, under the nonce the caller sent, and signs both with the key behind the
+    partner's card. Each task keeps what last arrived on it, so a read 21 minutes
+    later is countersigned against the request it answers.
+    """
+
+    key: Ed25519PrivateKey
+    kid: str
+    now: Callable[[], float] = time.time
+    arrived: dict[str, Arrived] = field(default_factory=dict)
+
+    @staticmethod
+    def received(message: Message) -> Arrived | None:
+        """What arrived, hashed under the caller's nonce; None if it sent none."""
+        nonce = str(message.metadata[NONCE]) if NONCE in message.metadata else ""
+        if not nonce:  # a caller that asks for no receipt gets none
+            return None
+        data: dict[str, Any] = {}
+        for part in get_data_parts(message.parts):
+            data.update(part)
+        return Arrived(skill_of(message), nonce, digest(data, nonce),
+                       tuple(sorted(data)))
+
+    def stamp(self, task: Task) -> Task:
+        """The task as it leaves, with the partner's signed half in its metadata."""
+        came = self.arrived.get(task.id)
+        if came is None:
+            return task
+        at = datetime.fromtimestamp(self.now(), UTC).isoformat(timespec="seconds")
+        half = ReceiptHalf(came.skill, task.id, task.context_id,
+                           state_name(task.status.state), came.sent,
+                           digest(answered(task), came.nonce), came.fields, self.kid,
+                           at)
+        out = Task()
+        out.CopyFrom(task)  # the stored task is never changed by a receipt
+        signed = asdict(half.signed(self.key))
+        out.metadata.update({RECEIPT_URI: {**signed, "fields": list(came.fields)}})
+        return out
+
+    def forget(self) -> None:
+        self.arrived.clear()
+
+
 class KeyedHandler(DefaultRequestHandler):
-    """The partner's half of a key: a repeat inside the window gets the first task."""
+    """The partner's half of a key: a repeat inside the window gets the first task.
+
+    Since Chapter 17 it also runs the partner's half of the trace and the receipt:
+    every send starts a span of the partner's own, linked to the caller's context,
+    and every task it returns, on a send or a read, carries the partner's
+    countersignature when the partner countersigns.
+    """
+
+    countersigner: Countersigner | None = None
 
     def __init__(self, *args: Any, windows: Mapping[str, int], keys: Keys,
                  now: Callable[[], float], **kwargs: Any) -> None:
@@ -170,6 +242,26 @@ class KeyedHandler(DefaultRequestHandler):
 
     async def on_message_send(self, params: SendMessageRequest,
                               context: ServerCallContext) -> Message | Task:
+        message = params.message
+        signer = self.countersigner
+        arrived = signer.received(message) if signer else None  # before the executor
+        with served(skill_of(message), message.metadata):
+            result = await self._keyed(params, context)
+        if signer is None or not isinstance(result, Task):
+            return result
+        if arrived is not None:
+            signer.arrived[result.id] = arrived
+        return signer.stamp(result)
+
+    async def on_get_task(self, params: GetTaskRequest,
+                          context: ServerCallContext) -> Task | None:
+        task: Task | None = await super().on_get_task(params, context)
+        if task is None or self.countersigner is None:
+            return task
+        return self.countersigner.stamp(task)
+
+    async def _keyed(self, params: SendMessageRequest,
+                     context: ServerCallContext) -> Message | Task:
         message = params.message
         window = self.windows.get(skill_of(message))
         if message.task_id or window is None:  # a follow-up, or no key promised
@@ -206,7 +298,8 @@ def a2a_app(card: AgentCard, executor: AgentExecutor,
             push: tuple[InMemoryPushNotificationConfigStore,
                         PushNotificationSender] | None = None,
             keys: Keys | None = None,
-            now: Callable[[], float] = time.time) -> Starlette:
+            now: Callable[[], float] = time.time,
+            countersign: Countersigner | None = None) -> Starlette:
     """A Starlette app serving the card and the JSON-RPC endpoint at the card's URL.
 
     `extra` adds routes beside them, such as the key set a card's signature names.
@@ -216,12 +309,15 @@ def a2a_app(card: AgentCard, executor: AgentExecutor,
     `keys` is the key index (Chapter 12), kept across releases like the task store.
     Its windows come from the card's own terms, so what the partner promises and what
     its handler does cannot disagree.
+    `countersign` is the partner's half of every seam receipt (Chapter 17), signed with
+    the key behind its card; None returns no half, and the caller's receipts are its own.
     """
     configs, sender = push or (None, None)
     handler = KeyedHandler(
         agent_executor=executor, task_store=store or InMemoryTaskStore(),
         agent_card=card, push_config_store=configs, push_sender=sender,
         windows=key_windows(card), keys={} if keys is None else keys, now=now)
+    handler.countersigner = countersign
     routes = [*create_agent_card_routes(card), *extra,
               *create_jsonrpc_routes(handler, "/")]
     app = Starlette(routes=routes)

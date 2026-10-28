@@ -60,6 +60,7 @@ class Finding:
     partner_release: str = ""
     detail: str = ""
     compensation: str = ""  # Chapter 13: the compensation task, if one was sent
+    receipt: str = ""  # Chapter 17: the digest of the receipt the partner signed
 
 
 reconcile_logger = logging.getLogger("seamkit.reconcile")
@@ -132,7 +133,8 @@ class Reconciler:
         def verdict(name: str, task_id: str = "", detail: str = "") -> Finding:
             return Finding(entry["seam"], name, entry["idempotency_key"],
                            task_id or entry["task_id"], thread, entry["seen_at"],
-                           entry["authority"], entry["partner_release"], detail)
+                           entry["authority"], entry["partner_release"], detail,
+                           receipt=entry.get("receipt", ""))
 
         try:
             with as_thread(config):  # the claim's own chain, as the backstop reads

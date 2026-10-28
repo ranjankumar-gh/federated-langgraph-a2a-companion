@@ -44,7 +44,7 @@ from a2a.client import A2AClientError, ClientFactory
 from a2a.helpers import get_data_parts, new_data_message
 from a2a.types import AgentCard, AgentInterface, CancelTaskRequest, GetTaskRequest
 from a2a.types import ListTasksRequest
-from a2a.types import Role
+from a2a.types import Message, Role
 from a2a.types import SendMessageConfiguration
 from a2a.types import SendMessageRequest, Task, TaskPushNotificationConfig, TaskState
 from a2a.utils.constants import VERSION_HEADER
@@ -102,7 +102,19 @@ from seamkit.ledger import (
     state_name,
     unanswered,
 )
+from seamkit.receipt import (
+    NONCE,
+    ReceiptHalf,
+    ReceiptMismatch,
+    Receipts,
+    SeamReceipt,
+    answered,
+    close,
+    digest,
+    thread_of,
+)
 from seamkit.retry import NO_RETRY, RetryPolicy, refuse_retry, retrying
+from seamkit.tracing import current_trace_id, inject, seam_span, trace_id, traceparent
 from seamkit.trust import (
     Gradient,
     PartnerTrust,
@@ -338,7 +350,7 @@ class CrossingRecord:
     seam: str
     partner: str
     partner_release: str
-    call: str  # "send" or "get"
+    call: str  # "send", "get", "list", "cancel", or "push" (Chapter 17)
     sent: tuple[str, ...]  # field names, never values
     context_id: str = ""
     task_id: str = ""
@@ -346,6 +358,11 @@ class CrossingRecord:
     error: str = ""
     idempotency_key: str = ""  # joins a crossing to its ledger entry
     behaviour: str = ""  # Chapter 15: the behaviour version the skill is recorded under
+    # Chapter 17: when Claims recorded it, on the clock every owner reads; how long a
+    # send waited for its answer; and the trace the crossing's span belongs to
+    at: float = 0.0
+    seconds: float | None = None
+    trace_id: str = ""
 
 
 crossing_logger = logging.getLogger("seamkit.crossing")
@@ -411,6 +428,10 @@ class RemoteAgentNode:
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
     # Chapter 14: the seam's breaker, asked before a send opens work and told after
     breaker: SeamBreaker | None = None
+    # Chapter 17: what the node needs to cut a seam receipt; None keeps none
+    receipts: Receipts | None = None
+    # key -> the traceparent of the send that opened its task, until the ledger has it
+    traces: dict[str, str] = field(default_factory=dict)
 
     async def __call__(self, state: Mapping[str, Any]) -> dict[str, Any]:
         name = self.seam.name
@@ -421,6 +442,7 @@ class RemoteAgentNode:
                 raise BreakerOpen(name, why)  # nothing recorded, nothing sent
             return {"ledger": {name: self.intend()}}
         sending = {k: state[k] for k in self.seam.sends}
+        said: Mapping[str, Any] | None = sending  # what this entry sends, if anything
         if entry["state"] == "unknown":  # sent, answer lost: the same key, or a lookup
             task = await self.recover(sending, entry)
         elif not entry["task_id"]:
@@ -432,14 +454,16 @@ class RemoteAgentNode:
             except PartnerUnavailable:  # record the attempt; re-entry recovers it
                 return {"ledger": {name: unanswered(entry)}}
         else:  # a task exists: read it, never send a second one
-            task = await self._get(entry["task_id"])
+            said = None
+            task = await self._get(entry["task_id"], entry.get("traceparent", ""))
             if self._waits_for_us(task) and entry["state"] == "input-required":
-                reply = interrupt(question_of(task))  # asked only once it is recorded
+                reply = said = interrupt(question_of(task))  # asked once recorded
                 task = await self._send(reply, entry)  # same task, same context
             elif (self.breaker and entry["state"] != "failed"
                   and state_name(task.status.state) == "failed"):
                 self.breaker.failed_later(seamkit.ledger.CLOCK())  # never sent: read
-        seen = observe(entry, task, self.partner.release)
+        seen = self._accounted(entry, observe(entry, task, self.partner.release), task,
+                               said)
         if task.status.state == COMPLETED:
             answer = self._outcome(task)
             return {**answer, "ledger": {name: {**seen, "wrote": sorted(answer)}},
@@ -447,6 +471,50 @@ class RemoteAgentNode:
         if moved(entry, seen):  # record what came back, map it next entry
             return {"ledger": {name: seen}}
         return self._outcome(task)  # unchanged and unfinished: raises, task recorded
+
+    def _accounted(self, entry: LedgerEntry, seen: LedgerEntry, task: Task,
+                   said: Mapping[str, Any] | None) -> LedgerEntry:
+        """Chapter 17: the entry keeps the trace that sent the task and what Claims
+        last sent on it, and every answer that moves it is receipted."""
+        key = entry["idempotency_key"]
+        if parent := self.traces.pop(key, ""):
+            seen = {**seen, "traceparent": parent}
+        if self.receipts is None:
+            return seen
+        if said is not None:
+            seen = {**seen, "sent": self.receipts.sent(said, key)}
+        if moved(entry, seen) or task.status.state == COMPLETED:
+            seen = {**seen, "receipt": self.receipt(seen, task, said).digest}
+        return seen
+
+    def receipt(self, seen: LedgerEntry, task: Task,
+                said: Mapping[str, Any] | None) -> SeamReceipt:
+        """Cut, check and log the receipt for one answer; a mismatch is raised."""
+        assert self.receipts is not None
+        receipts, key = self.receipts, seen["idempotency_key"]
+        nonce = receipts.nonce(key)
+        sent: dict[str, Any] = seen.get("sent") or {"digest": "", "fields": []}
+        ours = ReceiptHalf(self.seam.skill, task.id, task.context_id, seen["state"],
+                           sent["digest"], digest(answered(task), nonce),
+                           tuple(sent["fields"]), receipts.kid, seamkit.ledger.now())
+        try:
+            theirs = close(ours, task, receipts.pinned, receipts.countersigned,
+                           self.seam.name)
+        except ReceiptMismatch as exc:  # the answer is not taken; both owners hear
+            self.log(self._record("get", ())(task_id=task.id, error=type(exc).__name__))
+            receipts.mismatched(exc)
+            raise
+        held = self.partner.terms[0] if self.partner.terms else None
+        undoes = held is not None and any(
+            s.compensated_by == self.seam.skill for s in held.skills.values())
+        answer = {k: v for p in answered(task)["artifacts"] for k, v in p.items()}
+        return receipts.log.append(SeamReceipt(
+            self.seam.name, thread_of(), ours.signed(receipts.key), theirs,
+            seen["card_digest"], seen["authority"], seen.get("behaviour", ""),
+            self.partner.release, held.revision if held else "", key,
+            trace_id(seen.get("traceparent", "")),
+            approval=str((said or {}).get("approval", "")),
+            outcome=answer if undoes else {}))
 
     async def recover(self, sending: Mapping[str, Any], entry: LedgerEntry) -> Task:
         """An entry left unknown: resend under its key, or find the task it opened."""
@@ -632,12 +700,24 @@ class RemoteAgentNode:
             message.message_id = key
         # A2A messages carry no skill field; the skill id travels in metadata.
         message.metadata.update({"skill": self.seam.skill})
+        task_key = key or str((link or {}).get("idempotency_key", ""))
+        if self.receipts is not None and task_key:  # Chapter 17: the task's nonce
+            message.metadata.update({NONCE: self.receipts.nonce(task_key)})
+        with seam_span(self.seam.name, "send", self.seam.skill, sorted(data)) as span:
+            inject(message.metadata)  # the trace context crosses in the message
+            if key and (parent := traceparent(span)):
+                self.traces[key] = parent  # the ledger entry keeps it
+            return await self._exchange(message, data, key)
+
+    async def _exchange(self, message: Message, data: Mapping[str, Any],
+                        key: str | None) -> Task:
         request = SendMessageRequest(message=message, configuration=(
             SendMessageConfiguration(
                 return_immediately=self.seam.return_immediately,
                 task_push_notification_config=self.push(self.seam.name, key))))
         record = self._record("send", tuple(data), key or "")
         task: Task | None = None
+        started = seamkit.ledger.CLOCK()
         try:
             async for event in self.partner.client.send_message(
                     request, context=ClientCallContext(timeout=self.seam.timeout)):
@@ -658,7 +738,8 @@ class RemoteAgentNode:
             self.log(record(error="no task"))
             raise MalformedAnswer(self.seam.name, "the partner replied without a task")
         self.log(record(context_id=task.context_id, task_id=task.id,
-                        state=TaskState.Name(task.status.state)))
+                        state=TaskState.Name(task.status.state),
+                        seconds=seamkit.ledger.CLOCK() - started))
         return task
 
     async def probe(self, data: Mapping[str, Any],
@@ -709,7 +790,12 @@ class RemoteAgentNode:
         self.log(self._record("cancel", ())(task_id=task_id, state=outcome))
         return outcome
 
-    async def _get(self, task_id: str) -> Task:
+    async def _get(self, task_id: str, after: str = "") -> Task:
+        """One read; `after` links its span to the send that opened the task."""
+        with seam_span(self.seam.name, "read", self.seam.skill, after=after):
+            return await self._read(task_id)
+
+    async def _read(self, task_id: str) -> Task:
         record = self._record("get", ())
         try:
             task = await self.partner.client.get_task(
@@ -732,11 +818,13 @@ class RemoteAgentNode:
 
     def _record(self, call: str, sent: tuple[str, ...],
                 key: str = "") -> Callable[..., CrossingRecord]:
-        def finish(**result: str) -> CrossingRecord:
+        def finish(**result: Any) -> CrossingRecord:
             return CrossingRecord(self.seam.name, self.seam.owner, self.partner.release,
                                   call, sent, idempotency_key=key,
                                   behaviour=self.partner.behaviour.get(
-                                      self.seam.skill, ""), **result)
+                                      self.seam.skill, ""),
+                                  at=seamkit.ledger.CLOCK(),
+                                  trace_id=current_trace_id(), **result)
 
         return finish
 

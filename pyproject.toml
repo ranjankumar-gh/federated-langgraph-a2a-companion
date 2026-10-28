@@ -11,6 +11,8 @@ dependencies = [
     "a2a-sdk[http-server,signing]==1.2.2",
     "cryptography==50.0.2",
     "langgraph==1.2.15",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-sdk==1.45.1",
     "rfc8785==0.1.4",
 ]
 

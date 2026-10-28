@@ -14,7 +14,7 @@ answer met Claims' expectations, the hop is Claims: the expectations let it thro
 """
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from seamkit.contract import Expectations, violations
@@ -28,6 +28,9 @@ class Hop:
     owner: str
     seam: str  # "" for a field the walker's own code wrote
     why: str
+    # Chapter 17: the receipt for the answer the hop is about, which both owners
+    # signed: what Claims cites, one hop further than its own records reach
+    receipt: str = ""
 
 
 def hop_on(seam: str, owner: str, records: Sequence[CrossingRecord],
@@ -55,12 +58,13 @@ def attribute(field: str, state: Mapping[str, Any], records: Sequence[CrossingRe
         return Hop("Claims", seam, f"{field} came from {tag['substitute']}")
     entry = state.get("ledger", {}).get(seam, {})
     key, task_id = entry.get("idempotency_key", ""), tag["task_id"]
+    signed = entry.get("receipt", "")
     if failed := hop_on(seam, e.owner, records, key, task_id):
-        return failed
+        return replace(failed, receipt=signed)
     answer = {theirs: state[ours] for theirs, ours in e.into.items() if ours in state}
     if wrong := violations(answer, e.reads):
-        return Hop(e.owner, seam, "; ".join(wrong))
-    return Hop("Claims", seam, f"{e.owner}'s answer met Claims' expectations")
+        return Hop(e.owner, seam, "; ".join(wrong), signed)
+    return Hop("Claims", seam, f"{e.owner}'s answer met Claims' expectations", signed)
 
 
 __all__ = ["Hop", "attribute", "hop_on"]

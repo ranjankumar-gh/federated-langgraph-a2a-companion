@@ -37,3 +37,9 @@ unit = "claim currency"
 into = "estimate_notes"
 type = "string"
 max_chars = 600  # room for any real note; a padded one is refused
+
+[slo]  # Chapter 17: the partner's promise, measured by Claims on the shared clock
+target = 0.95  # Northgate promises 4 s at p95: 95 sends in 100 inside it
+seconds = 4.0
+window_days = 28  # a design value for Meridian, not a benchmark
+alert = 0.5  # half the window's budget spent pages both owners

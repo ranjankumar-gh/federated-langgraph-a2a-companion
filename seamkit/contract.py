@@ -21,6 +21,7 @@ from pydantic import BaseModel, create_model
 from seamkit.breaker import MODES, BreakerPolicy
 from seamkit.canary import DRIFT_ACTIONS, Band, CanaryPolicy
 from seamkit.retry import NO_RETRY, RetryPolicy
+from seamkit.slo import SeamSLO, slo_of
 
 if TYPE_CHECKING:
     from seamkit.remote import SeamSpec
@@ -89,6 +90,8 @@ class SeamTerms:
     accepts: frozenset[str]  # the caller's data classes the partner agrees to hold
     # Chapter 7: the longest the partner may act under a revoked chain; None states none
     revocation_seconds: int | None = None
+    # Chapter 17: "countersigned" if the partner signs its half of every seam receipt
+    receipts: str = ""
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,10 @@ class Expectations:
     # Chapter 8: artifact key -> how a read is closed (pattern, choices, items) or
     # capped (max_chars); seamkit.ingress turns these into the seam's ingress rules.
     ingress: Mapping[str, Mapping[str, Any]] = dc_field(default_factory=dict)
+    # Chapter 17: "countersigned" needs the partner's half on every receipt, and "ours"
+    # keeps one-sided receipts; the seam's SLO, None for a seam nobody measures
+    receipts: str = "ours"
+    slo: SeamSLO | None = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +191,7 @@ def check(terms: SeamTerms, expects: Expectations,
     found += _retry(skill, terms, expects)  # 9. Chapter 12
     found += _late(skill, expects)  # Chapter 14
     found += _canary(skill, expects)  # Chapter 15
+    found += _receipts(terms, expects)  # Chapter 17
     return [_breach(terms, expects, d) for d in found]
 
 
@@ -289,6 +297,14 @@ def _canary(skill: SkillTerms, expects: Expectations) -> list[str]:
             "so it is never sent a canary"]
 
 
+def _receipts(terms: SeamTerms, expects: Expectations) -> list[str]:
+    """A receipt the terms never promised is a promise nobody made."""
+    if expects.receipts != "countersigned" or terms.receipts == "countersigned":
+        return []
+    return ["countersigns no receipts, and this seam expects every answer "
+            "countersigned"]
+
+
 def violations(answer: Mapping[str, Any], shapes: Mapping[str, Field]) -> list[str]:
     """What in a completed task's artifact is not the shape the seam depends on."""
     return [f"{key} is {answer[key]!r}, not {want}"
@@ -347,6 +363,8 @@ def _plain(terms: SeamTerms) -> dict[str, Any]:
              "accepts": sorted(terms.accepts)}
     if terms.revocation_seconds is not None:  # Chapter 7; absent from older revisions
         plain["revocation_seconds"] = terms.revocation_seconds
+    if terms.receipts:  # Chapter 17; absent from older revisions
+        plain["receipts"] = terms.receipts
     return plain
 
 
@@ -380,7 +398,8 @@ def _terms(raw: Mapping[str, Any]) -> SeamTerms:
         tuple(str(a) for a in raw.get("auth", [])),
         int(raw.get("skew_seconds", 0)),  # protobuf Struct numbers arrive as floats
         frozenset(str(c) for c in raw.get("accepts", [])),
-        int(revocation) if revocation is not None else None)
+        int(revocation) if revocation is not None else None,
+        str(raw.get("receipts", "")))
 
 
 # In the caller's repository: one TOML file per seam.
@@ -411,7 +430,9 @@ def load_expectations(path: Path) -> Expectations:
         breaker=_breaker(raw["breaker"]) if "breaker" in raw else None,
         protocols=tuple(str(p) for p in raw.get("protocols", [])),
         notice_days=int(raw["notice_days"]) if "notice_days" in raw else None,
-        canary=_canary_policy(raw["canary"]) if "canary" in raw else None)
+        canary=_canary_policy(raw["canary"]) if "canary" in raw else None,
+        receipts=str(raw.get("receipts", "ours")),
+        slo=slo_of(raw["slo"]) if "slo" in raw else None)
 
 
 def _policy(raw: Mapping[str, Any]) -> RetryPolicy:

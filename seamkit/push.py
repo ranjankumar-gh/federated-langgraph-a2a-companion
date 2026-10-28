@@ -32,9 +32,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+import seamkit.ledger
 from seamkit.breaker import SeamBreaker
 from seamkit.ledger import TERMINAL, LedgerEntry
-from seamkit.remote import RemoteAgentNode
+from seamkit.remote import CrossingRecord, RemoteAgentNode, log_crossing
 from seamkit.resume import sweep, wake
 
 # The notification token header the SDK's push sender sets (the A2A reference appendix
@@ -128,8 +129,17 @@ class PushRecord:
     verdict: str
 
 
+def as_crossing(record: PushRecord, partner: str = "") -> CrossingRecord:
+    """Chapter 17: a push is a crossing too, recorded with its verdict and never its
+    body. It gets no receipt: Claims took nothing from it but a reason to read."""
+    return CrossingRecord(record.seam, partner, "", "push", (), task_id=record.task_id,
+                          state=f"{record.status} {record.verdict}",
+                          at=seamkit.ledger.CLOCK())
+
+
 def log_push(record: PushRecord) -> None:
     push_logger.info("push received", extra={"push": asdict(record)})
+    log_crossing(as_crossing(record))
 
 
 @dataclass

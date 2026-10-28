@@ -47,7 +47,13 @@ from seamkit.errors import SeamError
 from seamkit.ingress import IngressRule
 from seamkit.remote import CrossingRecord, connect
 from seamkit.revocation import RevocationSource, checked, checker
-from seamkit.server import GraphExecutor, a2a_app, agent_card, delegation_config
+from seamkit.server import (
+    Countersigner,
+    GraphExecutor,
+    a2a_app,
+    agent_card,
+    delegation_config,
+)
 from seamkit.tools import remote_skill_tool
 
 RISK_URL = "http://risk.meridian.test/"
@@ -193,6 +199,8 @@ class RiskPartner:
     wire: Callable[[ASGIApp], httpx.AsyncBaseTransport] | None = None
     # Chapter 15: the protocol versions Risk's card offers, one interface each
     protocols: tuple[str, ...] = ("1.0",)
+    # Chapter 17: Risk signs its half of every seam receipt, a CI rule inside Meridian
+    countersigns: bool = False
 
     def __post_init__(self) -> None:
         sources = (revocation_sources() if self.revocations is None
@@ -212,7 +220,8 @@ class RiskPartner:
             self.history_breaker = SeamBreaker("estimate_history", "Northgate",
                                                "estimate_history", self.breaker)
         self.card = risk_card(self.release, self.terms, self.protocols)
-        inner = a2a_app(self.card, self.executor)
+        signs = Countersigner(KEYS["risk"], "risk", self.now) if self.countersigns else None
+        inner = a2a_app(self.card, self.executor, countersign=signs)
         self.guard = Guard(inner, "risk", MERIDIAN_TRUSTS, now=self.now,
                            revoked=self.check)
         self.app: ASGIApp = inner if self.forwards else self.guard

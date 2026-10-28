@@ -30,3 +30,9 @@ bounds = [0, 100]  # the referral threshold of 70 is written on this scale
 into = "screening_basis"
 type = "string"
 choices = ["full", "without estimate history"]
+
+[slo]  # Chapter 17: the partner's promise, measured by Claims on the shared clock
+target = 0.95  # Risk promises 5 s at p95: 95 sends in 100 inside it
+seconds = 5.0
+window_days = 28  # a design value for Meridian, not a benchmark
+alert = 0.5  # half the window's budget spent pages both owners

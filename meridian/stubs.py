@@ -21,13 +21,15 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from a2a.types import AgentCard
+from google.protobuf.json_format import ParseDict
 
 from meridian.canaries import ESTIMATE_BASELINE, ESTIMATE_GOLDENS
 from meridian.federated import EXPECTATIONS, SEAMS
 from meridian.saga import SAGA_EXPECTATIONS
 from meridian.trust import SAGA_TRUST
 from seamkit.cards import card_digest, jwk
-from seamkit.contract import SeamTerms
+from seamkit.contract import SeamTerms, terms_of
 from seamkit.contracttest import ContractTest, export, suite
 from seamkit.inventory import SeamInventory
 from seamkit.remote import RemoteAgentNode, connect
@@ -98,6 +100,19 @@ def northgate_stub(**kwargs: Any) -> StubPartner:
     return StubPartner(recording, kwargs.pop("scripted", SCRIPTED), **kwargs)
 
 
+def receipted_terms(recording: Recording | None = None) -> SeamTerms:
+    """Chapter 17: the recorded terms, as revision v7.5 changes them: Northgate
+    countersigns every answer, and nothing else moves."""
+    card = ParseDict(dict((recording or load(RECORDING)).card), AgentCard(),
+                     ignore_unknown_fields=True)
+    return replace(terms_of(card)[0], revision="v7.5", receipts="countersigned")
+
+
+def receipted_stub(**kwargs: Any) -> StubPartner:
+    """Northgate under v7.5, as Claims' CI sees it: the stub countersigns with its key."""
+    return northgate_stub(terms=[receipted_terms()], **kwargs)
+
+
 def estimate_suite(recordings: Sequence[Recording] | None = None) -> list[ContractTest]:
     """The estimate seam's contract tests, from its expectations and its recordings."""
     return suite(EXPECTATIONS["repair_estimate"], recordings or [load(RECORDING)])
@@ -133,4 +148,5 @@ if __name__ == "__main__":
 
 
 __all__ = ["CI_TRUST", "FRAME", "PHOTO", "PRICED", "RECORDING", "SCRIPTED", "SUITE",
-           "UNPRICED", "estimate_suite", "northgate_stub", "record", "with_tests"]
+           "UNPRICED", "estimate_suite", "northgate_stub", "receipted_stub",
+           "receipted_terms", "record", "with_tests"]

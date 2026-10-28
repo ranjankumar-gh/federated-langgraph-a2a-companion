@@ -45,7 +45,13 @@ from langgraph.types import interrupt
 from starlette.types import ASGIApp
 
 from meridian.agents import pay
-from meridian.identity import ISSUER, MERIDIAN, MERIDIAN_TRUSTS, revocation_sources
+from meridian.identity import (
+    ISSUER,
+    KEYS,
+    MERIDIAN,
+    MERIDIAN_TRUSTS,
+    revocation_sources,
+)
 from seamkit.approval import decode_approval, refuse_approval
 from seamkit.cards import card_digest
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
@@ -54,6 +60,7 @@ from seamkit.errors import SeamError
 from seamkit.ledger import question_digest
 from seamkit.revocation import RevocationSource, checker, still_holds
 from seamkit.server import (
+    Countersigner,
     GraphExecutor,
     Keys,
     Waiting,
@@ -193,11 +200,15 @@ class FinancePartner:
     addressed: bool = True
     # Chapter 11: the client the push sender posts with; None rings nobody
     push: httpx.AsyncClient | None = None
+    # Chapter 17: Finance signs its half of every seam receipt, a CI rule inside Meridian
+    countersigns: bool = False
 
     def __post_init__(self) -> None:
         sources = (revocation_sources() if self.revocations is None
                    else self.revocations)
         self.sources = sources
+        self.countersigner = Countersigner(KEYS["finance"], "finance", self.now) if (
+            self.countersigns) else None  # one across releases, like the task store
         graph = StateGraph(PaymentState)
         graph.add_node("make_payment", make_payment)
         if self.release in TWO_PARTY:  # Chapter 10: two approvals before the payment
@@ -232,7 +243,8 @@ class FinancePartner:
         and the guard keeps the tasks it has bound to a person and a claim."""
         self.release, self.card = release, finance_card(release)
         inner = a2a_app(self.card, self.executor, store=self.executor.store,
-                        push=self.pushing, keys=self.keys, now=self.now)
+                        push=self.pushing, keys=self.keys, now=self.now,
+                        countersign=self.countersigner)
         self.guard = Guard(inner, "finance", MERIDIAN_TRUSTS, now=self.now,
                            revoked=checker(self.sources), tasks=self.bound,
                            holders=self.holders)

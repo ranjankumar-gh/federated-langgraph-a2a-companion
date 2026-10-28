@@ -64,6 +64,12 @@ class LedgerEntry(TypedDict):
     # Chapter 15: the behaviour version the skill was recorded under when this task
     # was sent, from the seam's accepted canary baseline; "" for a seam with none
     behaviour: NotRequired[str]
+    # Chapter 17: the W3C traceparent of the send that opened the task; what Claims
+    # last sent on it ({"digest", "fields"}, under the task's nonce); and the digest of
+    # the newest seam receipt for it
+    traceparent: NotRequired[str]
+    sent: NotRequired[dict[str, Any]]
+    receipt: NotRequired[str]
 
 
 def merge_ledger(current: Mapping[str, LedgerEntry],

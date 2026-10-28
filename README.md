@@ -379,6 +379,41 @@ Run only this chapter's tests with `uv run pytest tests/test_ch15_versions.py`.
 Run only this chapter's tests with `uv run pytest tests/test_ch16_stub.py
 tests/test_ch16_contracts.py`.
 
+### Chapter 17: Trace What You Own, Receipt What You Don't
+
+- `seamkit/tracing.py`: one OpenTelemetry span per send and per read (`seam_span`), named
+  after the seam and carrying names and ids, never values; W3C trace context written into
+  the A2A message's metadata (`inject`); the partner's own span, a new trace with a link to
+  the caller's (`served`). The companion depends on the OpenTelemetry API and SDK; the
+  tests export spans to memory, and nothing is traced until a tracer provider is set.
+- `seamkit/receipt.py`: `ReceiptHalf`, `SeamReceipt`, `digest` (sha256 over RFC 8785 JSON
+  and a per-task nonce), `close` (checks the partner's half against Claims'),
+  `ReceiptMismatch`, `Receipts` (what a node needs to cut them), and `ReceiptLog`
+  (append-only JSON lines, one hash chain per seam, kept apart from any checkpoint).
+  `seamkit/server.py`: `Countersigner`, the partner's half, cut in `a2a_app`'s handler.
+  `seamkit/remote.py`: the node carries the nonce and the trace context, keeps
+  `traceparent`, `sent` and `receipt` in its ledger entry, and receipts every answer that
+  moves the entry. `CrossingRecord` gains `at`, `seconds` and `trace_id`, and a push is
+  logged as a crossing record with its verdict (`seamkit/push.py`).
+- `seamkit/contract.py`: `SeamTerms.receipts`, `Expectations.receipts` and `[slo]`, and
+  the rule that refuses countersigned expectations against terms that declare none.
+  `seamkit/slo.py`: `SeamSLO`, `Budget` and `burn`. `seamkit/ownership.py`: the ownership
+  map (`load_map`, `route`, `require`) and the signals the earlier chapters raise.
+- `northgate/server.py`: terms v7.5, which countersign, and `forget`. `meridian/receipts.py`:
+  Claims' pins, `receipted`, and `with_receipts` for the inventory. `meridian/ownership.toml`
+  and `meridian/ownership_risk.toml`: Claims' map and Risk's.
+  `meridian/expectations/repair_estimate.receipted.toml`: the estimate seam under v7.5.
+  Risk and Finance countersign when deployed with `countersigns=True`; the stub
+  countersigns with its CI key under terms that declare receipts (`receipted_stub`).
+- `tests/test_ch17_receipts.py`: the audit nobody could answer, the receipt log that answers
+  it after Northgate forgets, what a receipt carries, mismatches, one-sided receipts, the
+  broken chain, and spans. `tests/test_ch17_ownership.py`: Chapter 14's incident on two
+  maps, drift and residue routes, startup, SLO burn, and the inventory's accountability
+  column.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch17_receipts.py
+tests/test_ch17_ownership.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

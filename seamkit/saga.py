@@ -262,7 +262,8 @@ class Compensator:
                 (undo or forward)["seen_at"], forward["authority"],
                 (undo or forward)["partner_release"],
                 "; ".join(d for d in (detail, f"settled by {step.settles}") if d),
-                undo["task_id"] if undo else ""))
+                undo["task_id"] if undo else "",
+                undo.get("receipt", "") if undo else ""))  # Chapter 17: what was signed
         return {"undone": {key: verdict}}
 
 

@@ -40,7 +40,14 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from seamkit.cards import card_digest, sign_card
 from seamkit.contract import SeamTerms, terms_of, violations
 from seamkit.push import TOKEN_HEADER
-from seamkit.server import StoreWriter, a2a_app, key_set_route, push_sender, skill_of
+from seamkit.server import (
+    Countersigner,
+    StoreWriter,
+    a2a_app,
+    key_set_route,
+    push_sender,
+    skill_of,
+)
 from stub.faults import EXECUTOR, WIRE, Fault, FaultScript
 from stub.recording import Exchange, Recording
 
@@ -254,10 +261,13 @@ class StubPartner:
         self.sender: PushNotificationSender | None = None
         if pushes:
             self.configs, self.sender = pushes
+        # Chapter 17: terms that countersign get a stub that does, with its CI key
+        signs = Countersigner(STUB_KEY, STUB_KID, self.now) if (
+            held.receipts == "countersigned") else None
         inner = a2a_app(self.card, self.executor,
                         [key_set_route(STUB_KEYS_PATH,
                                        {STUB_KID: STUB_KEY.public_key()})],
-                        store=self.store, push=pushes, now=self.now)
+                        store=self.store, push=pushes, now=self.now, countersign=signs)
         if self.terms:  # paper terms: the key windows are the ones agreed, not carded
             inner.state.handler.windows = {
                 sid: s.key_seconds for sid, s in held.skills.items()
@@ -304,6 +314,8 @@ class StubPartner:
             await self.store.delete(task_id, ServerCallContext())
         self.executor.hung.clear()
         self.handler.keys.clear()
+        if self.handler.countersigner:
+            self.handler.countersigner.forget()
 
 
 __all__ = ["ANY", "STUB_KEY", "STUB_KEYS_PATH", "STUB_KID", "StubExecutor",

@@ -42,6 +42,7 @@ from typing import Any
 from a2a.helpers import get_data_parts, new_data_part, new_task_from_user_message
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
+from a2a.server.tasks import InMemoryTaskStore
 from a2a.server.tasks import TaskUpdater
 from a2a.types import AgentCard
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -55,7 +56,13 @@ from seamkit.delegation import Guard, Trust, Verified, peer_of
 from seamkit.cards import jwk, sign_card
 from seamkit.revocation import ActPoint, RevocationSource, checker, still_holds
 from seamkit.push import doorbell
-from seamkit.server import a2a_app, agent_card, key_set_route, push_sender
+from seamkit.server import (
+    Countersigner,
+    a2a_app,
+    agent_card,
+    key_set_route,
+    push_sender,
+)
 
 NORTHGATE_URL = "http://northgate.example.test/"
 
@@ -123,8 +130,12 @@ NORTHGATE_V7_4 = replace(
     NORTHGATE_V7_3, revision="v7.4", effective=date(2027, 1, 18),
     skills={**NORTHGATE_V7_3.skills, "book_repair": BOOK_REPAIR,
             "cancel_booking": CANCEL_BOOKING})
+# Chapter 17: a dated revision that changes one thing. Northgate signs its half of a
+# seam receipt for every answer, with the key behind its card.
+NORTHGATE_V7_5 = replace(NORTHGATE_V7_4, revision="v7.5", effective=date(2027, 2, 15),
+                         receipts="countersigned")
 TERMS = {"v7": NORTHGATE_V7_2, "v7.3": NORTHGATE_V7_3, "v7.4": NORTHGATE_V7_4,
-         "v8": NORTHGATE_V8}  # the revision each release runs
+         "v7.5": NORTHGATE_V7_5, "v8": NORTHGATE_V8}  # the revision each release runs
 
 # What each repairing shop typed into its estimate form, by claim. Northgate passes the
 # notes through as they were written; it did not write them.
@@ -507,10 +518,14 @@ class NorthgatePartner:
         if self.signs:
             sign_card(self.card, NORTHGATE_SIGNING_KEY, NORTHGATE_KID,
                       NORTHGATE_URL.rstrip("/") + KEY_SET_PATH)
+        signs = Countersigner(NORTHGATE_SIGNING_KEY, NORTHGATE_KID, self.now) if (
+            terms.receipts == "countersigned") else None  # Chapter 17: v7.5's term
         inner = a2a_app(self.card, self.executor, [
             key_set_route(KEY_SET_PATH,
                           {NORTHGATE_KID: NORTHGATE_SIGNING_KEY.public_key()})],
-            push=push_sender(self.push) if self.push else None, now=self.now)
+            push=push_sender(self.push) if self.push else None, now=self.now,
+            countersign=signs)
+        self.handler = inner.state.handler
         self.guard = Guard(inner, "northgate", TRUSTS, now=self.now,
                            revoked=checker(sources) if sources else None)
         front: ASGIApp = self.guard if self.verifies_chains else TokenCheck(inner)
@@ -521,4 +536,14 @@ class NorthgatePartner:
         """Meridian's issuer signed a new list: pull it now, through the same checks."""
         for source in self.sources.values():
             source.ring(self.now())
+
+    async def forget(self) -> None:
+        """Chapter 17: Northgate's retention ran out, or it restored a backup. Every
+        task it held is gone, with what its countersigner remembered of each."""
+        store = self.handler.task_store
+        assert isinstance(store, InMemoryTaskStore)
+        for held in store._impl.tasks.values():  # every caller's tasks, as stored
+            held.clear()
+        if self.handler.countersigner:
+            self.handler.countersigner.forget()
 

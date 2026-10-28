@@ -29,3 +29,9 @@ deadline_seconds = 600  # no resend later than ten minutes after the first send
 into = "payment_ref"
 type = "string"
 pattern = "PAY-CLM-[0-9]{4}-[0-9]+"  # closed: a reference, never a sentence
+
+[slo]  # Chapter 17: the partner's promise, measured by Claims on the shared clock
+target = 0.95  # Finance promises 3 s at p95: 95 sends in 100 inside it
+seconds = 3.0
+window_days = 28  # a design value for Meridian, not a benchmark
+alert = 0.5  # half the window's budget spent pages both owners

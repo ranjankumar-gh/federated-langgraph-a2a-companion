@@ -1,0 +1,48 @@
+# What Claims depends on from Northgate's estimate_repair once terms v7.5 countersign every
+# answer (Chapter 17). Claims owns this file. The earlier chapters' federations keep
+# repair_estimate.toml, as they keep Northgate's earlier terms.
+seam = "repair_estimate"
+owner = "Northgate"
+skill = "estimate_repair"
+protocols = ["1.0"]  # Chapter 15: newest first; a card offering none is a breach
+sends = ["claim_id", "damaged_parts"]
+refuses = ["photo_url"]  # no Claims human photographs a car
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+revocation_seconds = 120  # the longest a revoked chain may act at Northgate
+slo_seconds = 10.0
+delivery = "push"  # the assessor desk takes about 21 minutes on frame damage
+backstop_seconds = 300  # a lost push is found within five minutes
+notice_days = 21  # Chapter 15: a breaking revision is on the card 3 weeks ahead
+receipts = "countersigned"  # Chapter 17: Northgate signs its half of every receipt
+
+[canary]  # Chapter 15: four golden tasks, judged against the accepted baseline
+every_seconds = 21600  # every six hours: 16 tasks a day, billed at 3.5 each
+relative = 0.05  # an estimate may move 5% and still be the same behaviour
+confirm = 1  # an estimate decides a payment: one run out of band is drift
+on_drift = "unproven"  # back under the 5,000 ceiling, and a finding for a person
+
+[breaker]  # Chapter 14: counts only Northgate's failures to answer
+late_seconds = 6.0  # Northgate promises 4 s at p95; later than 6 s counts
+failures = 3  # counted outcomes inside the window open it
+window_seconds = 60
+open_seconds = 300  # five minutes before one real estimate tests Northgate
+trial = "estimate_repair"  # billed and kept: the plan's cost accepted
+max_in_flight = 4  # no more than four sends wait on Northgate at once
+mode = "substitute"  # a Claims desk assessor estimates, tagged as the desk's
+
+[reads.estimate]
+into = "repair_estimate"
+type = "number"
+unit = "claim currency"
+
+[reads.notes]  # the shop's own words, passed through by Northgate: text
+into = "estimate_notes"
+type = "string"
+max_chars = 600  # room for any real note; a padded one is refused
+
+[slo]  # Chapter 17: the partner's promise, measured by Claims on the shared clock
+target = 0.95  # Northgate promises 4 s at p95: 95 sends in 100 inside it
+seconds = 4.0
+window_days = 28  # a design value for Meridian, not a benchmark
+alert = 0.5  # half the window's budget spent pages both owners

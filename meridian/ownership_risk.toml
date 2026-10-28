@@ -1,0 +1,25 @@
+# Risk's ownership map. Risk owns this file, as Claims owns its own: the seam Risk calls
+# and the seam Risk serves. Claims' map never names Northgate for the screening seam;
+# Risk's map is where Northgate is named, for the call Risk makes.
+owner = "Risk"
+oncall = "risk-oncall"
+
+[routes]
+breaker = ["caller", "callee"]
+stop = ["caller", "callee"]
+drift = ["caller", "callee"]
+reconcile = ["caller"]
+residue = ["caller"]
+push = ["caller"]
+receipt = ["caller", "callee"]
+slo = ["caller", "callee"]
+
+[seams.estimate_history]  # the peer seam: Risk calls Northgate
+callee = "Northgate"
+callee_contact = "northgate-support, via the partner manager"
+
+[seams.fraud_screening]  # the seam Risk serves: its caller is Claims
+caller = "Claims"
+callee = "Risk"
+caller_oncall = "claims-oncall"
+callee_contact = "risk-oncall"
