@@ -157,8 +157,9 @@ class DecisionRecord:
         else:
             note = "Not a seam: no owner line."
             if v.warnings:
-                note += (" Also differs, a deployment or access problem and not a "
-                         f"reason to seam: {', '.join(v.warnings)}.")
+                differs = " and ".join(v.warnings)
+                note += (f"\nWarning: {differs} differs. Under one owner that is a "
+                         "deployment or access\nproblem, not a reason for a seam.")
         return TEMPLATE.format(
             caller=c.caller, callee=c.callee,
             caller_owner=c.caller_facts.owner, callee_owner=c.callee_facts.owner,

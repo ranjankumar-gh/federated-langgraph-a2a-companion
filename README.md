@@ -14,6 +14,11 @@ codebase exactly as it stood at the end of that chapter:
 git checkout <slug>
 ```
 
+Chapter 2's tag is the one exception to reading order. Its cost test measures `policy_lookup`
+behind the A2A wire, so the Chapter 2 tag already contains the wire Chapter 3 builds
+(`seamkit/remote.py`, `seamkit/server.py`, the partner servers) and the task ledger Chapter 9
+introduces. Chapter 2's text says so where it borrows them.
+
 ## Running the tests
 
 ```
@@ -35,6 +40,19 @@ required for the rest of the suite to pass.
   (no network; each partner is a separately constructed runtime that accepts JSON only).
 - `seamkit/inventory.py`: the seam inventory, derived from a compiled graph and an owner map.
 - `tests/test_ch01_breakage.py`: one test per seam property, each passing by showing the break.
+
+### Chapter 2: The Federation Test
+
+- `seamkit/federation.py`: the Federation Test (`federation_test`), `misplaced`, which finds
+  calls in the wrong place from a graph and a deployment, and `DecisionRecord`.
+- `meridian/decisions.py`: Meridian's owner facts, its five candidate calls, and their
+  decision records. `python -m meridian.decisions` rewrites them into `docs/decisions/`.
+- `meridian/policy.py`: the policy lookup folded back into the claims graph as a subgraph.
+- `meridian/policy_server.py`: the chapter's opening incident, the policy lookup behind its own
+  A2A server, kept deliberately wrong.
+- `docs/decisions/`: one federation decision record per Meridian call.
+- `tests/test_ch02_federation.py`, `tests/test_ch02_costs.py`: the test's verdicts, and the
+  policy lookup's seam costs measured both ways.
 
 ### Chapter 3: A2A as a LangGraph Runtime Sees It
 

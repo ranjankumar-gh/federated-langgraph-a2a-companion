@@ -70,7 +70,7 @@ REVISIT = {
     "payments": "Finance and Claims merge their release trains and data boundary.",
     "estimate_history": "Risk agrees to share its fraud signals with Claims (route it "
                         "through the hub), or a second peer seam is proposed.",
-    "policy_lookup": "another owner starts calling the policy lookup, or the policy "
+    "policy_lookup": "another owner calls the policy lookup, or the policy "
                      "administration team takes it over.",
 }
 
@@ -82,8 +82,8 @@ def costs(callee: str) -> dict[str, str]:
     if callee == "policy_lookup":
         out |= {"latency": "a round trip per claim instead of a function call",
                 "request body (CLM-1001)": "310 bytes",
-                "lost from the Claims checkpoint": "policy (which revision was read), "
-                "and the subgraph's 4 checkpoints"}
+                "lost from the Claims checkpoint": "the policy revision read, and 4 "
+                "subgraph checkpoints"}
     else:
         out |= {"latency": "a queue we do not run (per-seam p99, Ch 14)",
                 "checkpoint visibility": f"{OWNERS[callee]}'s steps stay in "
