@@ -93,6 +93,27 @@ Every test runs the real A2A SDK client against the real SDK servers in one proc
 
 Run only this chapter's tests with `uv run pytest tests/test_ch04_contract.py`.
 
+### Chapter 5: Which Cards to Trust
+
+- `seamkit/trust.py`: the card trust policy. `PartnerTrust` is what a caller pinned about one
+  owner's card (origins, keys by id or exact digests, approved skills); `decide` refuses a card
+  from an unpinned origin, without a signature by a pinned key (or not a pinned digest), or
+  without the skills the seam calls, and records any other skill as unapproved. `Gradient` and
+  `TrackRecord` are the trust gradient: a skill's answer is capped while it is unproven under a
+  card digest, and one malformed answer suspends it.
+- `seamkit/cards.py`: `card_digest`, the sha256 of the bytes a card signature covers, and
+  `sign_card`, the partner-side signer.
+- `seamkit/remote.py`: `connect(trust=...)` decides the card before the contract check;
+  `refresh` re-decides a refetched card; a refused seam raises `CardUntrusted` before sending.
+- `meridian/trust.py`: Meridian's policy. Northgate is pinned by key; Risk and Finance by the
+  digests their pipelines publish with each release.
+- `meridian/registry.py`, `meridian/lookalike.py`: the chapter's opening incident, a look-alike
+  Northgate found through the partner registry, kept deliberately wrong.
+- `tests/test_ch05_trust.py`: the incident before and after the policy, capability inflation,
+  and the trust gradient.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch05_trust.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

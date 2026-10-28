@@ -7,9 +7,14 @@ Northgate publishes its seam terms on its card (Chapter 4), as revisions with a 
 Release v8 prices parts per model and so requires the vehicle's VIN; a v7 deployment
 may announce v8's terms ahead of the release. The executor enforces the terms it is
 deployed with: a request missing a required input is rejected.
+
+Since Chapter 5, Northgate signs its card (JWS over the card's canonical JSON, Ed25519)
+with a key whose public half Meridian pinned at onboarding, by key id. It also serves
+that key at the URL the signature's header names, which a careful caller never needs.
+`books=True` deploys a later card that adds a `book_repair` skill no insurer approved.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any
@@ -18,13 +23,24 @@ from a2a.helpers import get_data_parts, new_data_part, new_task_from_user_messag
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
+from a2a.types import AgentCard
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.applications import Starlette
 
 from meridian.agents import PART_PRICES, estimate_repair
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
-from seamkit.server import a2a_app, agent_card
+from seamkit.cards import jwk, sign_card
+from seamkit.server import a2a_app, agent_card, key_set_route
 
 NORTHGATE_URL = "http://northgate.example.test/"
+
+# Northgate's card-signing key. The private half never leaves Northgate; Meridian pinned
+# the public half by its key id when the partner agreement was signed. The tests play
+# both companies, so both halves are here.
+NORTHGATE_KID = "northgate-cards-2026-06"
+NORTHGATE_SIGNING_KEY = Ed25519PrivateKey.generate()
+NORTHGATE_PUBLIC_JWK = jwk(NORTHGATE_SIGNING_KEY.public_key())
+KEY_SET_PATH = "/.well-known/jwks.json"
 
 # Northgate's terms. Northgate owns them; Meridian's code only reads them off the card.
 ESTIMATE_REPAIR = SkillTerms(
@@ -109,6 +125,19 @@ class NorthgateExecutor(AgentExecutor):
         await TaskUpdater(queue, context.task_id, context.context_id).cancel()
 
 
+def northgate_card(release: str, revisions: Sequence[SeamTerms],
+                   books: bool = False) -> AgentCard:
+    """Northgate's card for one release, with its terms, before it is signed."""
+    needs = "; needs the vehicle's VIN" if release == "v8" else ""
+    repair = f"List-price estimate for a claim's damaged parts{needs}"
+    skills = {"estimate_repair": repair,
+              "estimate_history": "Past estimates across the network for given parts"}
+    if books:
+        skills["book_repair"] = "Book the repair at a network shop against the estimate"
+    return agent_card("Northgate repair estimates", NORTHGATE_URL, release, skills,
+                      extensions=[publish(*revisions)] if revisions else [])
+
+
 @dataclass
 class NorthgatePartner:
     """Northgate's deployment.
@@ -121,17 +150,19 @@ class NorthgatePartner:
     release: str = "v7"
     announces: SeamTerms | None = None
     publishes: bool = True
+    signs: bool = True  # since Chapter 5; False deploys the unsigned card of Chapter 4
+    books: bool = False  # a card that also offers book_repair: capability inflation
     executor: NorthgateExecutor = field(init=False)
 
     def __post_init__(self) -> None:
         terms = TERMS[self.release]
         self.executor = NorthgateExecutor(terms)
         revisions = [terms, *([self.announces] if self.announces else [])]
-        needs = "; needs the vehicle's VIN" if self.release == "v8" else ""
-        repair = f"List-price estimate for a claim's damaged parts{needs}"
-        self.card = agent_card(
-            "Northgate repair estimates", NORTHGATE_URL, self.release,
-            {"estimate_repair": repair,
-             "estimate_history": "Past estimates across the network for given parts"},
-            extensions=[publish(*revisions)] if self.publishes else [])
-        self.app: Starlette = a2a_app(self.card, self.executor)
+        self.card = northgate_card(self.release, revisions if self.publishes else [],
+                                   self.books)
+        if self.signs:
+            sign_card(self.card, NORTHGATE_SIGNING_KEY, NORTHGATE_KID,
+                      NORTHGATE_URL.rstrip("/") + KEY_SET_PATH)
+        self.app: Starlette = a2a_app(self.card, self.executor, [
+            key_set_route(KEY_SET_PATH,
+                          {NORTHGATE_KID: NORTHGATE_SIGNING_KEY.public_key()})])

@@ -13,12 +13,14 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, TypedDict
 
+from a2a.types import AgentCard
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from starlette.applications import Starlette
 
 from meridian.agents import screen_fraud
+from seamkit.cards import card_digest
 from seamkit.contract import Field, SeamTerms, SkillTerms, publish
 from seamkit.server import GraphExecutor, a2a_app, agent_card
 
@@ -37,6 +39,21 @@ RISK_TERMS = SeamTerms("2026.09", date(2026, 9, 14), {"screen_fraud": SCREEN_FRA
 RISK_TERMS_0_1 = replace(RISK_TERMS, revision="2026.10", effective=date(2026, 10, 6),
                          skills={"screen_fraud": replace(SCREEN_FRAUD, outputs=(
                              Field("fraud_score", "number", bounds=(0.0, 1.0)),))})
+
+
+def risk_card(release: str, terms: SeamTerms = RISK_TERMS) -> AgentCard:
+    """Risk's card for one release, as Risk's pipeline builds and publishes it."""
+    return agent_card("Risk fraud screening", RISK_URL, release,
+                      {"screen_fraud": "Fraud score 0-100 for one claim"},
+                      extensions=[publish(terms)])
+
+
+# Every card Risk has released, with the 0-1 card Chapter 4's test publishes honestly.
+# Risk's pipeline publishes each card's digest with the release; Claims pins them.
+RELEASED: tuple[tuple[str, SeamTerms], ...] = (
+    ("2026.09", RISK_TERMS), ("2026.10", RISK_TERMS), ("2026.10", RISK_TERMS_0_1),
+    ("2026.11", RISK_TERMS), ("2026.12", RISK_TERMS))
+PUBLISHED_DIGESTS = frozenset(card_digest(risk_card(*release)) for release in RELEASED)
 
 
 class RiskScreenState(TypedDict, total=False):
@@ -85,7 +102,5 @@ class RiskPartner:
             self.graph, "fraud_screening",
             to_input=lambda claim: {"claim": claim},
             to_artifact=lambda out: {"fraud_score": out["fraud_score"] / scale})
-        self.card = agent_card("Risk fraud screening", RISK_URL, self.release,
-                               {"screen_fraud": "Fraud score 0-100 for one claim"},
-                               extensions=[publish(self.terms)])
+        self.card = risk_card(self.release, self.terms)
         self.app: Starlette = a2a_app(self.card, self.executor)

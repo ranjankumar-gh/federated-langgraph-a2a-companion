@@ -5,6 +5,10 @@ schema, so since Chapter 4 the argument schema is generated from the input terms
 partner publishes in its seam contract, and the outputs it promises become the field
 map and the shapes the answer is checked against. A partner that publishes no terms
 gets no tool.
+
+Since Chapter 5, a tool is built only for a skill the card trust policy approved on a
+trusted card. A tool built from every skill a card lists is how an unapproved skill
+reaches a model.
 """
 
 from collections.abc import Callable
@@ -13,7 +17,7 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 
 from seamkit.contract import args_model
-from seamkit.errors import ContractBreach
+from seamkit.errors import CardUntrusted, ContractBreach
 from seamkit.remote import (
     CrossingRecord,
     PartnerConnection,
@@ -26,6 +30,8 @@ from seamkit.remote import (
 def remote_skill_tool(partner: PartnerConnection, skill_id: str, owner: str,
                       log: Callable[[CrossingRecord], None] = log_crossing,
                       ) -> StructuredTool:
+    if why := partner.refuses(skill_id):  # the card trust policy decides, not the card
+        raise CardUntrusted(skill_id, why)
     skill = next(s for s in partner.card.skills if s.id == skill_id)  # as fetched
     terms = partner.terms[0].skills.get(skill_id) if partner.terms else None
     if terms is None:  # no published input terms: no schema a model may fill

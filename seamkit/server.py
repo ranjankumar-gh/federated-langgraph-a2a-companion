@@ -22,10 +22,15 @@ from a2a.types import (
     AgentInterface,
     AgentSkill,
 )
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from jwt.algorithms import OKPAlgorithm
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import BaseRoute, Route
 
 from seamkit.errors import SeamError
 
@@ -52,12 +57,32 @@ def agent_card(name: str, url: str, release: str, skills: Mapping[str, str],
     )
 
 
-def a2a_app(card: AgentCard, executor: AgentExecutor) -> Starlette:
-    """A Starlette app serving the card and the JSON-RPC endpoint at the card's URL."""
+def a2a_app(card: AgentCard, executor: AgentExecutor,
+            extra: Sequence[BaseRoute] = ()) -> Starlette:
+    """A Starlette app serving the card and the JSON-RPC endpoint at the card's URL.
+
+    `extra` adds routes beside them, such as the key set a card's signature names.
+    """
     handler = DefaultRequestHandler(
         agent_executor=executor, task_store=InMemoryTaskStore(), agent_card=card)
-    routes = [*create_agent_card_routes(card), *create_jsonrpc_routes(handler, "/")]
+    routes = [*create_agent_card_routes(card), *extra,
+              *create_jsonrpc_routes(handler, "/")]
     return Starlette(routes=routes)
+
+
+def key_set_route(path: str, keys: Mapping[str, Ed25519PublicKey]) -> Route:
+    """A JWK Set at `path`: the keys a partner says its card signatures use.
+
+    Serving it is harmless. Trusting a key because a card's header points here is not:
+    whoever serves the card can serve this too.
+    """
+    body = {"keys": [{**OKPAlgorithm.to_jwk(key, as_dict=True), "kid": kid,
+                      "alg": "EdDSA", "use": "sig"} for kid, key in keys.items()]}
+
+    async def key_set(request: Request) -> JSONResponse:
+        return JSONResponse(body)
+
+    return Route(path, key_set, methods=["GET"])
 
 
 class GraphExecutor(AgentExecutor):

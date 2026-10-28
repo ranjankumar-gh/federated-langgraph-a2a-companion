@@ -9,6 +9,11 @@ crossing record per call.
 Since Chapter 4, `connect` checks the partner's published terms against the seam's
 expectations, a breached seam refuses to send, and a completed artifact is checked
 against the shapes the seam depends on before the field map writes it.
+
+Since Chapter 5, `connect` runs the card trust policy first: a card the policy does not
+trust has no terms worth checking. The send step refuses an untrusted card, an
+unapproved skill, or a suspended one, and every completed answer is observed in the
+skill's track record under the card's digest (the trust gradient).
 """
 
 import logging
@@ -37,6 +42,7 @@ from seamkit.contract import (
     violations,
 )
 from seamkit.errors import (
+    CardUntrusted,
     ContractBreach,
     MalformedAnswer,
     PartnerFailed,
@@ -46,6 +52,14 @@ from seamkit.errors import (
     PartnerUnavailable,
     SeamError,
     TaskUnfinished,
+)
+from seamkit.trust import (
+    Gradient,
+    PartnerTrust,
+    TrackRecord,
+    TrustDecision,
+    decide,
+    log_decision,
 )
 
 # Every state the A2A specification defines, and the one graph outcome each becomes.
@@ -89,10 +103,44 @@ class PartnerConnection:
     terms: tuple[SeamTerms, ...] = ()  # the revisions held to, the one in force first
     breaches: tuple[Breach, ...] = ()  # in force now: the seam refuses to send
     upcoming: tuple[Breach, ...] = ()  # in announced revisions, each with its date
+    trust: TrustDecision | None = None  # the card trust policy's verdict (Chapter 5)
+    pinned: PartnerTrust | None = None  # what the verdict was decided against
+    # (skill, card digest) -> what Claims observed; shared across refreshes
+    records: dict[tuple[str, str], TrackRecord] = field(default_factory=dict)
 
     @property
     def release(self) -> str:
         return self.card.version
+
+    def record(self, skill: str) -> TrackRecord:
+        digest = self.trust.digest if self.trust else ""
+        return self.records.setdefault((skill, digest), TrackRecord())
+
+    def gradient(self, skill: str) -> Gradient:
+        gradients = self.pinned.gradients if self.pinned else {}
+        return gradients.get(skill, Gradient())
+
+    def refuses(self, skill: str) -> str:
+        """Why the card trust policy will not let `skill` be called now, or ""."""
+        if self.trust is None:  # no policy given: the card as fetched (Chapter 3)
+            return ""
+        if not self.trust.trusted:
+            return self.trust.refused
+        if skill not in self.trust.skills:  # capability inflation, or never offered
+            return f"{skill} is not approved for {self.trust.owner}"
+        if self.gradient(skill).tier(self.record(skill)) == "suspended":
+            return f"{skill} is suspended under this card after a malformed answer"
+        return ""
+
+    def over_ceiling(self, skill: str, answer: Mapping[str, Any]) -> str:
+        """Why this answer decides more than the skill has earned, or ""."""
+        gradient = self.gradient(skill)
+        limit = gradient.ceiling(self.record(skill))
+        value = answer.get(gradient.output)
+        if limit is None or not isinstance(value, (int, float)) or value <= limit:
+            return ""
+        return (f"{gradient.output} {value:,.0f} is over the {limit:,.0f} an unproven "
+                f"{skill} may decide")
 
 
 contract_logger = logging.getLogger("seamkit.contract")
@@ -101,22 +149,52 @@ contract_logger = logging.getLogger("seamkit.contract")
 async def connect(url: str, http: httpx.AsyncClient,
                   expects: Expectations | None = None,
                   policy: CrossingPolicy = NO_CROSSING,
-                  terms: Sequence[SeamTerms] = ()) -> PartnerConnection:
-    """Fetch the partner's card, build a client, and check the seam's contract.
+                  terms: Sequence[SeamTerms] = (),
+                  trust: PartnerTrust | None = None,
+                  records: dict[tuple[str, str], TrackRecord] | None = None,
+                  ) -> PartnerConnection:
+    """Fetch the partner's card, decide whether to trust it, and check the contract.
 
     With no expectations there is no seam to check (a lookup, a tool's partner).
     `terms` stands in for a partner that publishes none: the terms agreed on paper.
+    `trust` is the owner's entry in the caller's card trust policy; without one the
+    card is used as fetched, which is Chapter 3's behaviour and nobody's production.
     """
     card = await A2ACardResolver(http, url).get_agent_card()
     factory = ClientFactory(ClientConfig(httpx_client=http, streaming=False))
+    kept = {} if records is None else records
+    decision = None
+    if trust is not None:
+        decision = decide(card, url, trust, (expects.skill,) if expects else ())
+        log_decision(decision)
+        if not decision.trusted:  # a card that fails the policy has no terms to check
+            return PartnerConnection(card, factory.create(card), trust=decision,
+                                     pinned=trust, records=kept)
     revisions = tuple(terms) or terms_of(card)
     if expects is None:
-        return PartnerConnection(card, factory.create(card), revisions)
+        return PartnerConnection(card, factory.create(card), revisions,
+                                 trust=decision, pinned=trust, records=kept)
     now, announced = held_to(revisions, expects, policy)
     for breach in announced:  # found on the day it is announced, not the day it lands
         contract_logger.warning("contract breach announced: %s", breach)
-    return PartnerConnection(card, factory.create(card), revisions,
-                             tuple(now), tuple(announced))
+    return PartnerConnection(card, factory.create(card), revisions, tuple(now),
+                             tuple(announced), decision, trust, kept)
+
+
+async def refresh(connection: PartnerConnection, url: str, http: httpx.AsyncClient,
+                  expects: Expectations | None = None,
+                  policy: CrossingPolicy = NO_CROSSING) -> PartnerConnection:
+    """Refetch the card. The same digest keeps the connection; a new one is a new card.
+
+    A new card is decided and checked again, and its skills start unproven. If it is
+    not trusted, the seam fails closed: the old card is not kept, because the partner
+    no longer serves it.
+    """
+    fresh = await connect(url, http, expects, policy, trust=connection.pinned,
+                          records=connection.records)
+    same = connection.trust and fresh.trust and (
+        fresh.trust.digest == connection.trust.digest)
+    return connection if same else fresh
 
 
 @dataclass(frozen=True)
@@ -187,15 +265,28 @@ class RemoteAgentNode:
             for part in get_data_parts(artifact.parts):
                 answer.update(part)
         missing = [key for key in self.seam.receives if key not in answer]
-        if missing:
-            raise MalformedAnswer(self.seam.name, f"artifact lacks {missing}", task.id)
-        if wrong := violations(answer, self.seam.shapes):  # the contract's shapes
+        wrong = ([f"artifact lacks {missing}"] if missing
+                 else violations(answer, self.seam.shapes))  # the contract's shapes
+        self._observe(task.id, clean=not wrong)  # the trust gradient's evidence
+        if wrong:
             raise MalformedAnswer(self.seam.name, "; ".join(wrong), task.id)
+        if over := self.partner and self.partner.over_ceiling(self.seam.skill, answer):
+            raise CardUntrusted(self.seam.name, over, task.id)
         # The field map: only the keys this seam names reach state, under our names.
         return {ours: answer[theirs] for theirs, ours in self.seam.receives.items()}
 
+    def _observe(self, task_id: str, clean: bool) -> None:
+        if self.partner is None:  # a node built only to map an answer
+            return
+        record = self.partner.record(self.seam.skill)
+        # One malformed answer suspends the skill under this card.
+        (record.clean if clean else record.malformed).add(task_id)
+
     async def _send(self, data: Mapping[str, Any],
                     link: Mapping[str, str] | None = None) -> Task:
+        if why := self.partner.refuses(self.seam.skill):  # the card trust policy
+            self.log(self._record("send", tuple(data))(error=CardUntrusted.__name__))
+            raise CardUntrusted(self.seam.name, why)
         if self.partner.breaches:  # held per seam: this one stops, the others run
             self.log(self._record("send", tuple(data))(error=ContractBreach.__name__))
             raise ContractBreach(

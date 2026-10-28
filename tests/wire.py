@@ -1,5 +1,6 @@
 """Test plumbing for the A2A wire: in-process transports and a partner outage."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import httpx
@@ -40,7 +41,10 @@ class Federation:
     records: list[CrossingRecord] = field(default_factory=list)
     connections: dict[str, PartnerConnection] = field(default_factory=dict)
 
-    async def graph(self, http: dict[str, httpx.AsyncClient] | None = None
+    async def graph(self, http: dict[str, httpx.AsyncClient] | None = None,
+                    apps: Mapping[str, tuple[str, ASGIApp]] | None = None,
                     ) -> ClaimGraph:
-        self.connections = await connect_partners(self.partners.apps(), http)
+        """`apps` replaces a seam's deployment, such as one a registry lookup chose."""
+        deployed = {**self.partners.apps(), **(apps or {})}
+        self.connections = await connect_partners(deployed, http)
         return build_a2a_graph(self.connections, log=self.records.append)

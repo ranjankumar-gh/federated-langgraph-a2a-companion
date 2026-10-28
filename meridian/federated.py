@@ -6,6 +6,9 @@ sends one A2A task to a partner's server.
 
 Since Chapter 4, SEAMS is derived from the expectations files in meridian/expectations/,
 and connecting to a partner checks its published terms against them.
+
+Since Chapter 5, every partner's card is decided by Meridian's card trust policy
+(meridian/trust.py) before its contract is checked.
 """
 
 from collections.abc import Callable, Mapping
@@ -21,9 +24,11 @@ from meridian.data_classes import MERIDIAN_POLICY
 from meridian.finance_server import FINANCE_URL, FinancePartner
 from meridian.inprocess import ClaimGraph, build_graph
 from meridian.risk_server import RISK_URL, RiskPartner
+from meridian.trust import MERIDIAN_TRUST
 from northgate.server import NORTHGATE_URL, NorthgatePartner
 from seamkit.contract import Expectations, load_expectations, seam_spec
 from seamkit.inventory import SeamInventory
+from seamkit.trust import PartnerTrust
 from seamkit.remote import (
     CrossingRecord,
     PartnerConnection,
@@ -75,18 +80,37 @@ def in_process_http(url: str, app: ASGIApp, token: str) -> httpx.AsyncClient:
 async def connect_partners(
         apps: Mapping[str, tuple[str, ASGIApp]],
         http: Mapping[str, httpx.AsyncClient] | None = None,
+        trust: Mapping[str, PartnerTrust] = MERIDIAN_TRUST,
 ) -> dict[str, PartnerConnection]:
-    """Fetch each partner's card, check its terms, and build a client.
+    """Fetch each card, decide whether to trust it, check its terms, and build a client.
 
-    `http` overrides a transport. A seam whose terms are breached still connects; its
-    node refuses to send.
+    `http` overrides a transport. A seam whose card is untrusted, or whose terms are
+    breached, still connects; its node refuses to send. The policy is looked up by the
+    owner Claims' expectations name, never by anything the card says.
     """
     out: dict[str, PartnerConnection] = {}
     for seam, (url, app) in apps.items():
-        token = WORKLOAD_TOKENS[SEAMS[seam].owner]
-        client = (http or {}).get(seam) or in_process_http(url, app, token)
-        out[seam] = await connect(url, client, EXPECTATIONS[seam], MERIDIAN_POLICY)
+        owner = EXPECTATIONS[seam].owner
+        client = (http or {}).get(seam) or in_process_http(url, app, WORKLOAD_TOKENS[owner])
+        out[seam] = await connect(url, client, EXPECTATIONS[seam], MERIDIAN_POLICY,
+                                  trust=trust[owner])
     return out
+
+
+def with_trust(inventory: SeamInventory,
+               connections: Mapping[str, PartnerConnection]) -> SeamInventory:
+    """Put each seam's card decision first in its authority answer, never by hand."""
+    for entry in inventory.entries:
+        decision = (conn := connections.get(entry.callee)) and conn.trust
+        if not decision:
+            continue
+        answer = (f"card trusted by {decision.pinned_by}" if decision.trusted
+                  else f"card refused: {decision.refused}")
+        if decision.inflated:
+            answer += f" (unapproved: {', '.join(decision.inflated)})"
+        held = entry.answers.get("authority")
+        entry.answers["authority"] = answer + (f"; {held}" if held else "")
+    return inventory
 
 
 def with_contract(inventory: SeamInventory,
@@ -119,6 +143,7 @@ def build_a2a_graph(connections: Mapping[str, PartnerConnection],
     return build_graph(a2a_workers(connections, log), checkpointer)
 
 
-__all__ = ["EXPECTATIONS", "with_contract", "OWNERS_A2A", "SEAMS", "A2APartners",
+__all__ = ["EXPECTATIONS", "with_contract", "with_trust", "OWNERS_A2A", "SEAMS",
+           "A2APartners",
            "CrossingRecord", "build_a2a_graph",
            "connect_partners", "in_process_http"]
