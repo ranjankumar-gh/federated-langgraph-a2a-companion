@@ -1,13 +1,9 @@
 # Continuous integration for the companion repo. The matrix below lists the Python
 # versions the project supports.
 #
-# Kept minimal on purpose: it runs exactly what every increment already runs locally,
-# the tests and the type check, so a green tag means the same thing on a reader's
-# machine as on the author's. Nothing here needs a secret or a network service; tests
-# that need one are skip-guarded in the suite itself.
-#
-# Before the first push, check each `uses:` line against the action's current release
-# notes and bump the major version if a newer one is out. Do not guess a version.
+# It runs the same two commands as the README, the tests and the type check, so a green
+# run means the same thing as a green run on your machine. Nothing here needs a secret or
+# a network service.
 
 name: ci
 
