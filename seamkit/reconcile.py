@@ -39,6 +39,10 @@ ACTIONS: Mapping[str, str] = {
     "lost": "finding",  # the partner has no task for a recorded id: never resend
     "orphan": "finding",  # a partner task no entry names (Chapter 13 compensates)
     "unreadable": "retry",  # the partner did not answer: next run, then a person
+    # Chapter 13: what a compensation could not undo; each one is for people
+    "residue": "finding",  # undone, with something left owed or kept
+    "refused": "finding",  # the partner said no: never asked again
+    "uncompensated": "finding",  # no answer, or no task to name: the job takes over
 }
 
 
@@ -55,6 +59,7 @@ class Finding:
     authority: str = ""  # the chain the task was sent under, by id
     partner_release: str = ""
     detail: str = ""
+    compensation: str = ""  # Chapter 13: the compensation task, if one was sent
 
 
 reconcile_logger = logging.getLogger("seamkit.reconcile")
@@ -154,9 +159,13 @@ class Reconciler:
         named: set[str] = set()
         keys: dict[str, tuple[str, LedgerEntry]] = {}
         for thread, ledger in ledgers.items():
-            if entry := ledger.get(seam):
-                named |= {entry["task_id"], *entry["earlier"]}
-                keys[entry["idempotency_key"]] = (thread, entry)
+            for name, kept in ledger.items():  # an adopted orphan has its own entry
+                named.add(kept.get("compensates", ""))  # Chapter 13: undone tasks too
+                if kept["seam"] != seam:
+                    continue
+                named |= {kept["task_id"], *kept["earlier"]}
+                if name == seam:
+                    keys[kept["idempotency_key"]] = (thread, kept)
         try:
             with as_thread(self.config):
                 listed = await node.tasks()

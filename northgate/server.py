@@ -22,6 +22,12 @@ that key at the URL the signature's header names, which a careful caller never n
 Since Chapter 8, terms v7.2 add `notes` to the estimate: whatever the repairing shop typed
 into its estimate form, passed through. Northgate is trusted; the shop's text is not
 Northgate's.
+
+Since Chapter 13, terms v7.4 adopt `book_repair` openly, with its compensating skill:
+`cancel_booking`, honoured for 72 hours after a booking. It answers in one of three
+ways: cancelled with nothing owed; cancelled with the parts the shop already ordered
+owed; or refused, once the repair has started or the window has passed. It runs on the
+same plain SDK executor, so an undo assumes nothing about the partner's runtime.
 """
 
 import asyncio
@@ -101,7 +107,23 @@ NORTHGATE_V7_3 = replace(
     NORTHGATE_V7_2, revision="v7.3", effective=date(2026, 12, 21),
     skills={"estimate_repair": replace(ESTIMATE_REPAIR_NOTES, key_seconds=3600),
             "estimate_history": replace(ESTIMATE_HISTORY, key_seconds=3600)})
-TERMS = {"v7": NORTHGATE_V7_2, "v7.3": NORTHGATE_V7_3,
+# Chapter 13: booking, adopted with its undo. A booking may be cancelled for 72 hours
+# after it is made; the shop's costs by then are stated in the answer, never hidden.
+BOOK_REPAIR = SkillTerms(
+    inputs=(Field("claim_id", "string"), Field("damaged_parts", "string[]")),
+    outputs=(Field("booking", "string"), Field("shop", "string")),
+    p95_seconds=2.0, key_seconds=3600,
+    compensated_by="cancel_booking", compensate_seconds=72 * 3600)
+CANCEL_BOOKING = SkillTerms(
+    inputs=(Field("claim_id", "string"), Field("task", "string")),
+    outputs=(Field("outcome", "string"), Field("owed", "number", unit="claim currency"),
+             Field("residue", "string")),
+    p95_seconds=2.0, key_seconds=3600)
+NORTHGATE_V7_4 = replace(
+    NORTHGATE_V7_3, revision="v7.4", effective=date(2027, 1, 18),
+    skills={**NORTHGATE_V7_3.skills, "book_repair": BOOK_REPAIR,
+            "cancel_booking": CANCEL_BOOKING})
+TERMS = {"v7": NORTHGATE_V7_2, "v7.3": NORTHGATE_V7_3, "v7.4": NORTHGATE_V7_4,
          "v8": NORTHGATE_V8}  # the revision each release runs
 
 # What each repairing shop typed into its estimate form, by claim. Northgate passes the
@@ -124,7 +146,8 @@ TRUSTS: Mapping[str, Trust] = {MERIDIAN.root: MERIDIAN, INSURER_B.root: INSURER_
 
 # The skills each insurer's agreement covers. A chain says what the insurer authorised;
 # the agreement says what Northgate will do for that insurer at all.
-AGREEMENTS = {"meridian": {"estimate_repair", "estimate_history"},
+AGREEMENTS = {"meridian": {"estimate_repair", "estimate_history", "book_repair",
+                          "cancel_booking"},
               "insurer-b": {"estimate_repair", "estimate_history"}}
 
 # Repairs booked on Northgate's network: which shop has the car, and which parts.
@@ -155,6 +178,19 @@ ESTIMATES: dict[str, list[tuple[str, str, str, float]]] = {
         ("SHOP-7", "B-2188", "bumper", 1_300.0),
     ],
 }
+
+
+@dataclass
+class Booking:
+    """A repair booked at a network shop, and what the shop has done since."""
+
+    claim_id: str
+    shop: str
+    parts: list[str]
+    at: float  # when the booking committed
+    ordered: list[str] = field(default_factory=list)  # parts the shop has ordered
+    started: bool = False  # the shop has started work on the car
+    cancelled: dict[str, Any] | None = None  # cancel_booking's answer, once given
 
 
 def estimate_history(tenant: str, request: Mapping[str, Any],
@@ -204,6 +240,7 @@ class NorthgateExecutor(AgentExecutor):
         self.pending: dict[str, dict[str, Any]] = {}  # estimates waiting on authority
         self.acts: list[dict[str, Any]] = []  # every act point: when, which task, outcome
         self.canceled: list[str] = []  # tasks that ended canceled, never billed
+        self.booked: dict[str, Booking] = {}  # Chapter 13: booking task -> the booking
 
     async def execute(self, context: RequestContext, queue: EventQueue) -> None:
         assert context.message and context.task_id and context.context_id
@@ -221,6 +258,16 @@ class NorthgateExecutor(AgentExecutor):
                               "context_id": context.context_id, **_who(caller)})
         if skill not in AGREEMENTS.get(tenant, set()) or self._lacks(skill, request):
             await updater.reject()
+            return
+        if skill in ("book_repair", "cancel_booking"):  # Chapter 13
+            booked = (self._book(context.task_id, tenant, request)
+                      if skill == "book_repair" else self._cancel_booking(request))
+            if isinstance(booked, str):  # refused: the reason is the answer
+                await updater.reject(updater.new_agent_message(
+                    [new_data_part({"why": booked})]))
+                return
+            await updater.add_artifact([new_data_part(booked)], name=skill)
+            await updater.complete()
             return
         if skill == "estimate_history":
             await updater.add_artifact(
@@ -275,6 +322,44 @@ class NorthgateExecutor(AgentExecutor):
         await updater.complete()
         self.billed[task_id] = self.terms.skills["estimate_repair"].cost_per_task or 0.0
 
+    def _book(self, task_id: str, tenant: str,
+              request: Mapping[str, Any]) -> dict[str, Any]:
+        """book_repair: the shop that has the car takes the repair."""
+        claim = str(request["claim_id"])
+        shop, _ = BOOKINGS.get(tenant, {}).get(claim, ("SHOP-3", []))
+        self.booked[task_id] = Booking(claim, shop, list(request["damaged_parts"]),
+                                       self.now())
+        return {"booking": f"BK-{claim}-{shop}", "shop": shop}
+
+    def _cancel_booking(self, request: Mapping[str, Any]) -> dict[str, Any] | str:
+        """cancel_booking: three answers, and Northgate chooses which."""
+        booking = self.booked.get(str(request["task"]))
+        if booking is None or booking.claim_id != request["claim_id"]:
+            return f"no booking was made by task {request['task']}"
+        if booking.cancelled is not None:  # asked again: the same answer
+            return booking.cancelled
+        window = self.terms.skills["book_repair"].compensate_seconds or 0
+        if booking.started:
+            return f"the repair of {booking.claim_id} has started at {booking.shop}"
+        if self.now() - booking.at > window:
+            return f"past the {window // 3600}-hour cancellation window"
+        owed = sum(PART_PRICES[part] for part in booking.ordered)
+        residue = (f"{', '.join(booking.ordered)} ordered by {booking.shop} for "
+                   f"{booking.claim_id}" if booking.ordered else "")
+        booking.cancelled = {"outcome": "cancelled", "owed": owed, "residue": residue}
+        return booking.cancelled
+
+    def shop_orders(self, claim_id: str, *parts: str) -> None:
+        """The shop orders parts for a booked repair: from now on, they are owed."""
+        self._booking_of(claim_id).ordered.extend(parts)
+
+    def shop_starts(self, claim_id: str) -> None:
+        """The shop starts work: from now on, the booking cannot be cancelled."""
+        self._booking_of(claim_id).started = True
+
+    def _booking_of(self, claim_id: str) -> Booking:
+        return next(b for b in self.booked.values() if b.claim_id == claim_id)
+
     def _lacks(self, skill: str, request: Mapping[str, Any]) -> bool:
         """A required input of the terms this release runs under is missing."""
         terms = self.terms.skills.get(skill)
@@ -311,8 +396,11 @@ def northgate_card(release: str, revisions: Sequence[SeamTerms],
     repair = f"List-price estimate for a claim's damaged parts{needs}"
     skills = {"estimate_repair": repair,
               "estimate_history": "Past estimates by the shop repairing a claim"}
-    if books:
+    offered = revisions[0].skills if revisions else {}
+    if books or "book_repair" in offered:
         skills["book_repair"] = "Book the repair at a network shop against the estimate"
+    if "cancel_booking" in offered:  # Chapter 13: declared with the skill it undoes
+        skills["cancel_booking"] = "Cancel a booking you made; anything owed is stated"
     return agent_card("Northgate repair estimates", NORTHGATE_URL, release, skills,
                       extensions=[publish(*revisions)] if revisions else [], push=True)
 

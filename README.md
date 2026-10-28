@@ -255,6 +255,31 @@ Run only this chapter's tests with `uv run pytest tests/test_ch11_delivery.py`.
 
 Run only this chapter's tests with `uv run pytest tests/test_ch12_retries.py`.
 
+### Chapter 13: Compensation Across Owners: Sagas When You Can't Roll Back the Partner
+
+- `seamkit/saga.py`: `SagaStep` and `SagaPlan`, the saga plan; `check_plan`, which holds a
+  forward seam whose partner does not promise the plan's undo for the plan's window;
+  `UndoAuth`, the compensation link narrowed to one task; and the `Compensator`, a node that
+  walks the ledger newest first, cancels what has not committed and compensates what has.
+- `seamkit/contract.py`: `SkillTerms.compensate_seconds`. `seamkit/ledger.py`: the
+  `compensates` field and `compensation()`, with a key derived from the forward key and task.
+- `seamkit/delegation.py`: `Link.tasks` and `Grant.tasks`; the guard accepts a request naming a
+  task only from the workload that sent it. `seamkit/remote.py`: `RemoteAgentNode.cancel`.
+  `seamkit/reconcile.py`: the `residue`, `refused` and `uncompensated` verdicts.
+- `northgate/server.py`: terms v7.4, with `book_repair` and its compensating skill
+  `cancel_booking`. `meridian/finance_server.py`: release 2026.15, with `void_payment` and the
+  payment run. `meridian/identity.py`: the compensation root. `meridian/trust.py`:
+  `SAGA_TRUST`.
+- `meridian/saga.py`: Meridian's plan, the saga graph with the booking seam and the
+  compensator, `reopen` and `adopt`. `meridian/expectations/`: `repair_booking.toml` and the
+  two `.undo.toml` files.
+- `tests/test_ch13_compensation.py`: the incident, the compensator, a refused approval,
+  residue and refusals, the void before and after the payment run, a lost payment, lost
+  answers and crashes under the derived key, a revoked adjuster, the one-task link, Risk's
+  choreographed cancel refused, the plan check, and an adopted orphan.
+
+Run only this chapter's tests with `uv run pytest tests/test_ch13_compensation.py`.
+
 ## Contributing
 
 Turn on the repository's hooks once per clone:

@@ -10,6 +10,11 @@ Entries are plain dictionaries so that a checkpoint written by one Claims releas
 read by the next, whatever classes that release has. For the same reason, the keys
 Chapter 10 adds for a paused task are NotRequired: an entry an earlier release wrote
 still loads, and reads as a task nobody has asked anything on yet.
+
+Since Chapter 13 a compensation is a task like any other, so it has an entry of its
+own. The entry names the task it undoes (`compensates`), and its key is derived from
+the forward entry's key, so a resent compensation is a repeat, never a second undo. The
+forward entry is never rewritten to say it was undone.
 """
 
 import hashlib
@@ -24,6 +29,7 @@ from a2a.helpers import get_data_parts
 from a2a.types import Task, TaskState
 
 from seamkit.errors import StaleLedgerWrite
+from seamkit.retry import onward_key
 
 # A task in one of these states will never change again on the partner's side.
 TERMINAL = frozenset({"completed", "failed", "canceled", "rejected"})
@@ -51,6 +57,8 @@ class LedgerEntry(TypedDict):
     since: NotRequired[float]  # when Claims first saw this pause, on CLOCK
     asked: NotRequired[str]  # sha256 of the question as the partner sent it
     terms: NotRequired[str]  # sha256 of the skill's terms in force at the send
+    # Chapter 13: the forward task a compensation entry undoes; absent on every other
+    compensates: NotRequired[str]
 
 
 def merge_ledger(current: Mapping[str, LedgerEntry],
@@ -130,6 +138,18 @@ def question_digest(question: Mapping[str, Any]) -> str:
     """The question as the partner sent it, hashed: an approval is bound to this."""
     raw = json.dumps(dict(question), sort_keys=True, separators=(",", ":"), default=str)
     return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+
+
+def compensation(forward: LedgerEntry, seam: str, skill: str, card_digest: str,
+                 authority: str, release: str) -> LedgerEntry:
+    """The entry for a compensation of `forward`'s task, recorded before it is sent.
+
+    Its key is derived from the forward key and the forward task, so every resend of
+    this compensation, after a crash or a lost answer, repeats the same request.
+    """
+    key = onward_key(forward["idempotency_key"], f"compensate {forward['task_id']}")
+    return {**intended(seam, skill, card_digest, authority, release),
+            "idempotency_key": key, "compensates": forward["task_id"]}
 
 
 def unanswered(entry: LedgerEntry) -> LedgerEntry:

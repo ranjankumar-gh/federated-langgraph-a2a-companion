@@ -1,0 +1,19 @@
+# What Claims depends on from Northgate's book_repair. Claims owns this file.
+# Only the saga's graph (meridian/saga.py) sends on this seam.
+seam = "repair_booking"
+owner = "Northgate"
+skill = "book_repair"
+sends = ["claim_id", "damaged_parts"]
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+revocation_seconds = 120  # the longest a revoked chain may act at Northgate
+slo_seconds = 10.0
+
+[retry]  # a booking is resent only under a key Northgate's terms honour
+attempts = 3
+deadline_seconds = 600
+
+[reads.booking]
+into = "booking_ref"
+type = "string"
+pattern = "BK-CLM-[0-9]{4}-SHOP-[0-9]+"  # closed: a reference, never a sentence

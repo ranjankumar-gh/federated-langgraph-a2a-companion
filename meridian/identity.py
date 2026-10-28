@@ -7,6 +7,11 @@ one call to the identity provider per run; here it is a function with a cache.
 
 Each owner signs its own links with its own key. A partner verifies them against public
 keys it pinned out of band, so verifying a chain needs no call back to Meridian.
+
+Since Chapter 13 the issuer also mints a root for Claims itself, for one claim: the
+authority a compensation is sent under. It names no person, so a revoked or expired
+adjuster does not take it with her, and it grants the compensating skills and nothing
+else. Every link Claims mints under it names the one task it undoes.
 """
 
 import time
@@ -49,6 +54,10 @@ LEAD_SESSION, LEAD = "session-lead-031", "lead:tl-031"
 # claim, so its chain can list a partner's tasks for Claims and read none of them.
 RECONCILER_SESSION, RECONCILER = "session-reconcile", "service:reconciler"
 
+# Chapter 13: Claims itself, when it undoes a step it took. Not a session: the issuer
+# mints this root only for a claim Claims names, and only for the compensating skills.
+COMPENSATOR = "service:compensator"
+
 # The issuer's own records: whose session it is, and which claims she is working.
 SESSIONS: dict[str, tuple[str, frozenset[str]]] = {
     ADJUSTER_SESSION: (ADJUSTER, frozenset({"CLM-1001", "CLM-1002"})),
@@ -63,13 +72,18 @@ ROLES: dict[str, str] = {ADJUSTER: "claims/adjuster",
 # Everything a Claims run may ever do on an adjuster's behalf, and two hops below it.
 ROOT = Grant(
     skills=frozenset({"screen_fraud", "estimate_history", "estimate_repair",
-                      "pay_claim"}),
+                      "book_repair", "pay_claim"}),  # Ch 13: booking, adopted
     fields=frozenset({"claim_id", "amount", "days_to_report", "prior_claims",
                       "damaged_parts", "repair_estimate", "police_report",
                       "payment_memo", "approved", "approval"}),  # Ch 10: an answer
     hops=2)
 
 ROOT_LIFETIME = 15 * 60.0  # seconds; every link below expires no later
+
+# Chapter 13: what a compensation root grants. The compensating skills, the two fields
+# a compensation sends, and one hop: Claims' link to the partner that took the step.
+UNDO = Grant(skills=frozenset({"cancel_booking", "void_payment"}),
+             fields=frozenset({"claim_id", "task"}), hops=1)
 
 # Chapter 7: Meridian's settings for its revocation list, not measurements. A partner
 # that cannot pull a list for LIST_EVERY + LIST_GRACE seconds stops using it.
@@ -95,6 +109,7 @@ class MeridianIssuer:
     serving: bool = True  # False: the list endpoint is down (the drill cuts it)
     issued: dict[str, Link] = field(default_factory=dict)
     _list: RevocationList | None = None
+    _undo: dict[str, Chain] = field(default_factory=dict)  # claim -> compensation root
 
     def exchange(self, session: str) -> Chain:
         """An adjuster's session in, a root link addressed to Claims out."""
@@ -104,9 +119,10 @@ class MeridianIssuer:
         self.exchanges += 1
         return self._root(subject, claims, self.now() + ROOT_LIFETIME)
 
-    def _root(self, subject: str, claims: frozenset[str], expires: float) -> Chain:
-        root = sign(Link(ISSUER, "claims", subject, claims, ROOT.skills, ROOT.fields,
-                         ROOT.hops, expires), self.key)
+    def _root(self, subject: str, claims: frozenset[str], expires: float,
+              grant: Grant = ROOT) -> Chain:
+        root = sign(Link(ISSUER, "claims", subject, claims, grant.skills, grant.fields,
+                         grant.hops, expires), self.key)
         self.issued[chain_id((root,))] = root
         return (root,)
 
@@ -175,6 +191,17 @@ class MeridianIssuer:
         claims = frozenset().union(*(r.claims for r in self.issued.values()
                                      if r.subject == subject))
         return self._root(subject, claims, expires)
+
+    def compensation_chain(self) -> Chain:
+        """Chapter 13: the root a compensation of the run's claim is sent under."""
+        claim = run_value("compensating")
+        if not claim:
+            raise DelegationRefused("claims", "this run is compensating no claim")
+        root = self._undo.get(str(claim))
+        if root is None or root[0].expires - 60 <= self.now():
+            root = self._undo[str(claim)] = self._root(
+                COMPENSATOR, frozenset({str(claim)}), self.now() + ROOT_LIFETIME, UNDO)
+        return root
 
     def run_chain(self) -> Chain:
         """The root for the current Claims run, exchanged once per session lifetime."""

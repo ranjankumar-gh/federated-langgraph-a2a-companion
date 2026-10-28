@@ -8,7 +8,14 @@ pipeline, which publishes each card's digest with the release, so they are pinne
 digest: a release is trusted once a pull request adds its digest to this file.
 
 Every value here is a Meridian decision. None of it is read from a card.
+
+Chapter 13's revision, SAGA_TRUST, approves booking with its undo: book_repair and
+cancel_booking at Northgate, which is the skill Chapter 5 refused as capability
+inflation, now adopted on purpose, and void_payment at Finance. The earlier policy stays
+for the federations the earlier chapters run, as Finance's earlier releases do.
 """
+
+from dataclasses import replace
 
 from northgate.server import NORTHGATE_KID, NORTHGATE_PUBLIC_JWK, NORTHGATE_URL
 from meridian import finance_server, risk_server
@@ -35,3 +42,10 @@ FINANCE = PartnerTrust(
 # Keyed by the owner Claims' expectations name, never by the provider a card names.
 MERIDIAN_TRUST: dict[str, PartnerTrust] = {
     p.owner: p for p in (NORTHGATE, RISK, FINANCE)}
+
+# Chapter 13: a step and its undo are approved together, or not at all.
+SAGA_TRUST: dict[str, PartnerTrust] = {
+    **MERIDIAN_TRUST,
+    "Northgate": replace(NORTHGATE, skills=NORTHGATE.skills | {"book_repair",
+                                                               "cancel_booking"}),
+    "Finance": replace(FINANCE, skills=FINANCE.skills | {"void_payment"})}

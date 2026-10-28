@@ -34,6 +34,11 @@ Chapter 12's incident is ResendOnUnknown below: Chapter 9's never-resend rule re
 three resends under the entry's key, on a Finance that does nothing with a key. The
 partner's half of the key (seamkit.server.KeyedHandler), the seam retry policy
 (seamkit.retry), and the reconciliation job (seamkit.reconcile) are the fix.
+
+Chapter 13's incident is the saga graph built with no compensator,
+meridian.saga.build_saga_graph(workers, None): a reversed claim is referred and the run
+ends, leaving the booking standing at Northgate. The saga plan and the compensator
+(seamkit.saga) are the fix.
 """
 
 import json

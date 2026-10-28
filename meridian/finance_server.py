@@ -14,6 +14,13 @@ Release 2026.14 (Chapter 12) states a key window on pay_claim: for 24 hours, a s
 repeats a key gets the task the first send opened. The key index is kept across releases
 with the task store, and a restore from backup takes both back; the `paid` log, which
 stands for money that left Finance's bank, never goes back.
+
+Release 2026.15 (Chapter 13) declares `void_payment` as the compensating skill of
+pay_claim. A completed payment waits for Finance's payment run, which sends only
+payments that have waited out the 12-hour void window; until the run sends it,
+void_payment voids it. After that the money has left, and the answer is a refusal: what
+remains is a recovery from the payee, which is for people. `void_payment` has no graph
+behind it, so the executor answers it directly.
 """
 
 import copy
@@ -26,7 +33,10 @@ from typing import Any, TypedDict, cast
 
 import httpx
 
-from a2a.server.tasks import InMemoryTaskStore
+from a2a.helpers import get_data_parts, new_data_part, new_task_from_user_message
+from a2a.server.agent_execution import RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import AgentCard
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.runnables import RunnableConfig
@@ -51,6 +61,7 @@ from seamkit.server import (
     agent_card,
     ask,
     push_sender,
+    skill_of,
 )
 
 FINANCE_URL = "http://finance.meridian.test/"
@@ -87,10 +98,23 @@ FINANCE_TERMS_2026_14 = replace(
     FINANCE_TERMS_2026_13, revision="2026.14", effective=date(2027, 1, 11),
     skills={"pay_claim": replace(FINANCE_TERMS_2026_13.skills["pay_claim"],
                                  key_seconds=24 * 3600)})
+# Chapter 13: a payment can be voided until the payment run sends it, 12 hours on.
+VOID_PAYMENT = SkillTerms(
+    inputs=(Field("claim_id", "string"), Field("task", "string")),
+    outputs=(Field("outcome", "string"), Field("owed", "number", unit="claim currency"),
+             Field("residue", "string")),
+    p95_seconds=2.0, key_seconds=24 * 3600)
+FINANCE_TERMS_2026_15 = replace(
+    FINANCE_TERMS_2026_14, revision="2026.15", effective=date(2027, 2, 1),
+    skills={"pay_claim": replace(FINANCE_TERMS_2026_14.skills["pay_claim"],
+                                 compensated_by="void_payment",
+                                 compensate_seconds=12 * 3600),
+            "void_payment": VOID_PAYMENT})
 TERMS = {"2026.10": FINANCE_TERMS, "2026.11": FINANCE_TERMS_2026_11,
          "2026.12": FINANCE_TERMS_2026_12, "2026.12.1": FINANCE_TERMS_2026_12_1,
-         "2026.13": FINANCE_TERMS_2026_13, "2026.14": FINANCE_TERMS_2026_14}
-TWO_PARTY = frozenset({"2026.12", "2026.12.1", "2026.13", "2026.14"})
+         "2026.13": FINANCE_TERMS_2026_13, "2026.14": FINANCE_TERMS_2026_14,
+         "2026.15": FINANCE_TERMS_2026_15}
+TWO_PARTY = frozenset({"2026.12", "2026.12.1", "2026.13", "2026.14", "2026.15"})
 TWO_PARTY_OVER = 2_500.0
 
 
@@ -110,16 +134,47 @@ class PaymentState(TypedDict, total=False):
     claim: dict[str, Any]
     payment_ref: str
     approvers: list[str]  # Chapter 10: who approved, as each owner's identity says
+    task_id: str  # Chapter 13: the task that made the payment, which a void names
 
 
-def make_payment(state: PaymentState) -> PaymentState:
-    return {"payment_ref": pay(state["claim"])}
+def make_payment(state: PaymentState, config: RunnableConfig) -> PaymentState:
+    return {"payment_ref": pay(state["claim"]),
+            "task_id": str(config["configurable"].get("task_id", ""))}
+
+
+class PaymentsExecutor(GraphExecutor):
+    """pay_claim runs the payment graph; void_payment, a plain skill, is answered here
+    with no graph behind it."""
+
+    def __init__(self, *args: Any,
+                 voids: Callable[[Mapping[str, Any]], dict[str, Any] | str],
+                 **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.voids = voids
+
+    async def execute(self, context: RequestContext, queue: EventQueue) -> None:
+        message = context.message
+        if not (message and skill_of(message) == "void_payment"):
+            await super().execute(context, queue)
+            return
+        assert context.task_id and context.context_id
+        await queue.enqueue_event(new_task_from_user_message(message))
+        updater = TaskUpdater(queue, context.task_id, context.context_id)
+        answer = self.voids(get_data_parts(message.parts)[0])
+        if isinstance(answer, str):  # refused: the reason is the answer
+            await updater.reject(updater.new_agent_message(
+                [new_data_part({"why": answer})]))
+            return
+        await updater.add_artifact([new_data_part(answer)], name="void_payment")
+        await updater.complete()
 
 
 def finance_card(release: str) -> AgentCard:
     """Finance's card for one release, as Finance's pipeline builds and publishes it."""
-    return agent_card("Finance payments", FINANCE_URL, release,
-                      {"pay_claim": "Pay a claim against its estimate"},
+    skills = {"pay_claim": "Pay a claim against its estimate"}
+    if "void_payment" in TERMS[release].skills:  # Chapter 13
+        skills["void_payment"] = "Void a payment before the payment run sends it"
+    return agent_card("Finance payments", FINANCE_URL, release, skills,
                       extensions=[publish(TERMS[release])], push=True)
 
 
@@ -157,11 +212,11 @@ class FinancePartner:
         self.graph = graph.compile(checkpointer=self.checkpointer)
         self.memos: dict[str, str] = {}  # claim -> the memo printed on its payment
         self.paid: list[dict[str, Any]] = []  # every payment, with who approved it
-        self.executor = GraphExecutor(
+        self.executor = PaymentsExecutor(
             self.graph, "payments",
             to_input=self._received,
             to_artifact=self._paid,
-            own="finance" if self.addressed else "", now=self.now)
+            own="finance" if self.addressed else "", now=self.now, voids=self._void)
         # One push config store across releases, like the task store; the inbox rings
         # through the same sender, because a write from outside a request pushes nothing
         self.pushing = push_sender(self.push) if self.push else None
@@ -213,8 +268,33 @@ class FinancePartner:
     def _paid(self, out: dict[str, Any]) -> dict[str, Any]:
         self.paid.append({"claim_id": out["claim"]["claim_id"],
                           "payment_ref": out["payment_ref"],
-                          "approvers": out.get("approvers", [])})
+                          "approvers": out.get("approvers", []),
+                          # Chapter 13: which task paid it, when, and where it is now
+                          "task_id": out.get("task_id", ""), "at": self.now(),
+                          "sent": False, "voided": False})
         return {"payment_ref": out["payment_ref"]}
+
+    def _void(self, request: Mapping[str, Any]) -> dict[str, Any] | str:
+        """void_payment: honoured until the payment run sends the payment."""
+        if "void_payment" not in TERMS[self.release].skills:
+            return f"void_payment is not offered on {self.release}"
+        payment = next((p for p in self.paid if p["task_id"] == request["task"]
+                        and p["claim_id"] == request["claim_id"]), None)
+        if payment is None:
+            return f"no payment was made by task {request['task']}"
+        if payment["sent"]:  # the money has left: a recovery is for people
+            return f"{payment['payment_ref']} left in the payment run"
+        payment["voided"] = True
+        return {"outcome": "voided", "owed": 0.0, "residue": ""}
+
+    def payment_run(self) -> list[str]:
+        """Finance's payment run: every payment past its void window leaves the bank."""
+        held = TERMS[self.release].skills["pay_claim"].compensate_seconds or 0
+        due = [p for p in self.paid if not (p["sent"] or p["voided"])
+               and self.now() - p["at"] >= held]
+        for payment in due:
+            payment["sent"] = True
+        return [p["payment_ref"] for p in due]
 
     def _question(self, state: PaymentState, stage: str) -> dict[str, Any]:
         claim = state["claim"]

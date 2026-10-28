@@ -42,7 +42,8 @@ import httpx
 from a2a.client import A2ACardResolver, Client, ClientCallContext, ClientConfig
 from a2a.client import A2AClientError, ClientFactory
 from a2a.helpers import get_data_parts, new_data_message
-from a2a.types import AgentCard, GetTaskRequest, ListTasksRequest, Role
+from a2a.types import AgentCard, CancelTaskRequest, GetTaskRequest, ListTasksRequest
+from a2a.types import Role
 from a2a.types import SendMessageConfiguration
 from a2a.types import SendMessageRequest, Task, TaskPushNotificationConfig, TaskState
 from a2a.utils.errors import A2AError
@@ -547,6 +548,18 @@ class RemoteAgentNode:
     async def read(self, task_id: str) -> Task:
         """Read a recorded task, as a sweep or a resume gate does: one logged get."""
         return await self._get(task_id)
+
+    async def cancel(self, task_id: str) -> str:
+        """Ask the partner to cancel a task. Success is not guaranteed: read it after."""
+        try:
+            await self.partner.client.cancel_task(
+                CancelTaskRequest(id=task_id),
+                context=ClientCallContext(timeout=self.seam.timeout))
+            outcome = "canceled"
+        except (A2AClientError, A2AError) as exc:  # already final, or unreachable
+            outcome = type(exc).__name__
+        self.log(self._record("cancel", ())(task_id=task_id, state=outcome))
+        return outcome
 
     async def _get(self, task_id: str) -> Task:
         record = self._record("get", ())

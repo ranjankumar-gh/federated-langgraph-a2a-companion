@@ -1,0 +1,26 @@
+# What Claims depends on from Northgate's cancel_booking, the undo of book_repair.
+# Claims owns this file. The compensator sends on it (meridian/saga.py).
+seam = "repair_booking.undo"
+owner = "Northgate"
+skill = "cancel_booking"
+sends = ["claim_id", "task"]  # the task is the booking it undoes
+auth = ["mtls", "delegation"]
+skew_seconds = 30
+revocation_seconds = 120
+slo_seconds = 10.0
+
+[retry]  # every resend under the key derived from the booking's key
+attempts = 3
+deadline_seconds = 600
+
+[reads.outcome]
+type = "string"
+choices = ["cancelled"]  # a refusal is a rejected task, never an outcome
+
+[reads.owed]
+type = "number"
+unit = "claim currency"
+
+[reads.residue]  # what the shop had done by then, in Northgate's words: text
+type = "string"
+max_chars = 200

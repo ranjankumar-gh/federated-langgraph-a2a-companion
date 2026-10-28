@@ -81,6 +81,9 @@ GRANTS: dict[str, Grant] = {
     "payments": Grant(frozenset({"pay_claim"}),
                       frozenset(SEAMS["payments"].sends) | {"approved", "approval"},
                       hops=0),
+    # Chapter 13: the booking seam, which only the saga's graph sends on
+    "repair_booking": Grant(frozenset({"book_repair"}),
+                            frozenset({"claim_id", "damaged_parts"}), hops=0),
 }
 
 
@@ -115,6 +118,8 @@ async def connect_partners(
         http: Mapping[str, httpx.AsyncClient] | None = None,
         issuer: MeridianIssuer = CLAIMS_ISSUER,
         trust: Mapping[str, PartnerTrust] = MERIDIAN_TRUST,
+        expects: Mapping[str, Expectations] = EXPECTATIONS,
+        grants: Mapping[str, Grant] = GRANTS,
 ) -> dict[str, PartnerConnection]:
     """Fetch each card, decide whether to trust it, check its terms, and send a chain.
 
@@ -123,16 +128,18 @@ async def connect_partners(
     owner Claims' expectations name, never by anything the card says. Claims never
     sends a credential of its own: each call mints a link for that seam under the root
     the issuer exchanged for this run, and only to a card the policy trusts.
+    `expects` and `grants` add seams the default federation does not send on, such as
+    Chapter 13's booking seam.
     """
     out: dict[str, PartnerConnection] = {}
     for seam, (url, app) in apps.items():
         client = (http or {}).get(seam) or in_process_http(url, app, "claims")
-        owner = EXPECTATIONS[seam].owner
-        out[seam] = conn = await connect(url, client, EXPECTATIONS[seam],
+        owner = expects[seam].owner
+        out[seam] = conn = await connect(url, client, expects[seam],
                                          MERIDIAN_POLICY, trust=trust[owner])
         assert conn.trust is not None
         client.auth = DelegationAuth("claims", KEYS["claims"], owner.lower(),
-                                     GRANTS[seam], issuer.run_chain, conn.card,
+                                     grants[seam], issuer.run_chain, conn.card,
                                      conn.trust.covers)
     return out
 

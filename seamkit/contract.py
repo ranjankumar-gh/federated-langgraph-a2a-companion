@@ -70,6 +70,9 @@ class SkillTerms:
     # Chapter 12: how long the partner answers a repeat of a send's key with the task
     # the first send opened; None honours no key, and a resend is a second task
     key_seconds: int | None = None
+    # Chapter 13: how long after a task of this skill commits the partner promises to
+    # honour `compensated_by`; None promises nothing, and an undo may be refused
+    compensate_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -313,7 +316,9 @@ def _skill(raw: Mapping[str, Any]) -> SkillTerms:
         float(cost) if cost is not None else None,
         str(raw.get("compensated_by", "")),
         int(raw["wait_seconds"]) if raw.get("wait_seconds") is not None else None,
-        int(raw["key_seconds"]) if raw.get("key_seconds") is not None else None)
+        int(raw["key_seconds"]) if raw.get("key_seconds") is not None else None,
+        int(raw["compensate_seconds"]) if raw.get("compensate_seconds") is not None
+        else None)
 
 
 def _terms(raw: Mapping[str, Any]) -> SeamTerms:

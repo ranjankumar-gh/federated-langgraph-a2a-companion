@@ -15,6 +15,10 @@ verifies the chain against the issuers it pinned, binds it to the workload that
 presented it, checks the request against the last link's scope, and refuses with an
 authorization error before the A2A handler sees anything.
 
+Since Chapter 13 a link may also name tasks: a compensation's link names the one task it
+undoes, and a partner's guard accepts it for that task only, and only from the workload
+that sent the task. A link that names no task is not limited by task, as before.
+
 The encoding is this book's own (canonical JSON, Ed25519 signatures per owner), chosen
 so that the attenuation rule is visible in a few lines. It is not a standard format.
 """
@@ -60,6 +64,8 @@ class Link:
     expires: float  # epoch seconds, never later than the parent's
     parent: str = ""  # digest of the link above; empty at the root
     sig: str = ""  # the issuer's Ed25519 signature over every field above
+    # Chapter 13: the only tasks a request under this link may name; empty is any task
+    tasks: frozenset[str] = frozenset()
 
 
 Chain = tuple[Link, ...]
@@ -72,6 +78,7 @@ class Grant:
     skills: frozenset[str]
     fields: frozenset[str]
     hops: int
+    tasks: frozenset[str] = frozenset()  # Chapter 13: a compensation's one task
 
 
 # Encoding, digests and signatures -----------------------------------------------------
@@ -80,6 +87,9 @@ def _body(link: Link) -> dict[str, Any]:
     data = asdict(link)
     for key in ("claims", "skills", "fields"):
         data[key] = sorted(data[key])
+    tasks = data.pop("tasks")
+    if tasks:  # absent when empty, so every link minted before Chapter 13 hashes the same
+        data["tasks"] = sorted(tasks)
     return data
 
 
@@ -123,7 +133,9 @@ def decode(header: str) -> Chain:
         items = json.loads(base64.urlsafe_b64decode(header))
         return tuple(Link(**{**item, "claims": frozenset(item["claims"]),
                              "skills": frozenset(item["skills"]),
-                             "fields": frozenset(item["fields"])}) for item in items)
+                             "fields": frozenset(item["fields"]),
+                             "tasks": frozenset(item.get("tasks", []))})
+                     for item in items)
     except (ValueError, TypeError, KeyError, binascii.Error) as exc:
         raise DelegationRefused("", "the delegation header does not decode") from exc
 
@@ -142,6 +154,8 @@ def narrows(parent: Link, child: Link) -> list[str]:
         "does not spend a hop": 0 <= child.hops < parent.hops,
         "outlives its parent": child.expires <= parent.expires,
         "does not name its parent": child.parent == digest(parent),
+        "widens the tasks": not parent.tasks or (
+            bool(child.tasks) and child.tasks <= parent.tasks),
     }
     return [why for why, holds in checks.items() if not holds]
 
@@ -151,7 +165,7 @@ def mint(chain: Chain, key: Ed25519PrivateKey, issuer: str, audience: str,
     """The next link under `chain`, signed by `issuer`; refused if it would widen."""
     above = chain[-1]
     child = Link(issuer, audience, above.subject, claims, grant.skills, grant.fields,
-                 grant.hops, above.expires, parent=digest(above))
+                 grant.hops, above.expires, parent=digest(above), tasks=grant.tasks)
     if wider := narrows(above, child):
         raise DelegationRefused(audience, "cannot mint: " + "; ".join(wider))
     return sign(child, key)
@@ -211,6 +225,10 @@ class DelegationAuth(httpx.Auth):
         self.parent, self.card = parent, card
         self.trusted = trusted  # no default: no policy, no authority
 
+    def grant_now(self) -> Grant:
+        """The grant for the call being made; a compensation narrows it (Chapter 13)."""
+        return self.grant
+
     def auth_flow(self, request: httpx.Request,
                   ) -> Generator[httpx.Request, httpx.Response, None]:
         if request.method != "POST":  # the card is public; only calls carry authority
@@ -221,7 +239,7 @@ class DelegationAuth(httpx.Auth):
         chain = self.parent()  # the run's chain: none is a refusal, never a fallback
         claim = claim_named(request.content)  # a read names none: keep the parent's
         claims = frozenset([claim]) if claim else chain[-1].claims
-        link = mint(chain, self.key, self.owner, self.audience, self.grant, claims)
+        link = mint(chain, self.key, self.owner, self.audience, self.grant_now(), claims)
         request.headers[HEADER] = encode((*chain, link))
         yield request
 
@@ -292,6 +310,8 @@ def outside(scope: Link, skill: str, data: Mapping[str, Any], claim: str) -> lis
         problems.append(f"fields {extra} not granted")
     if claim not in scope.claims:
         problems.append(f"claim {claim or 'none'} not granted")
+    if "task" in data and str(data["task"]) not in scope.tasks:  # Chapter 13
+        problems.append(f"task {data['task']} not granted")
     return problems
 
 
@@ -392,20 +412,26 @@ class Guard:
         chain = decode(headers.get(HEADER.encode(), b"").decode())
         verified = verify(chain, peer_of(scope), self.me, self.trusts, self.now())
         params = rpc.get("params", {})
+        peer = peer_of(scope)
         if self.revoked and (why := self.revoked(verified.chain, self.now())):
             if self._cancels_own_task(scope, rpc, verified):  # the one exception
-                return verified, self._owned(str(params.get("id", "")), verified)
+                return verified, self._owned(str(params.get("id", "")), verified, peer)
             raise DelegationRevoked(self.me, why)
         if rpc.get("method") != "SendMessage":  # a read, a cancel: bound to the task
-            return verified, self._owned(str(params.get("id", "")), verified)
+            return verified, self._owned(str(params.get("id", "")), verified, peer)
         message = params.get("message", {})
         data = (message.get("parts") or [{}])[0].get("data", {})
         skill = str(message.get("metadata", {}).get("skill", ""))
         task_id = str(message.get("taskId", ""))
-        claim = self._owned(task_id, verified) if task_id else str(
+        claim = self._owned(task_id, verified, peer) if task_id else str(
             data.get("claim_id", ""))
         if problems := outside(verified.scope, skill, data, claim):
             raise DelegationRefused(self.me, "; ".join(problems))
+        if undoes := str(data.get("task", "")):  # Chapter 13: only its sender undoes it
+            _, bound = self.tasks.get(undoes, ("", ""))
+            if self.holders.get(undoes) != peer or bound != claim:
+                raise DelegationRefused(self.me, f"task {undoes} was not sent by {peer} "
+                                                 f"for {claim}")
         return verified, claim
 
     def _cancels_own_task(self, scope: Scope, rpc: Mapping[str, Any],
@@ -420,11 +446,18 @@ class Guard:
         return (rpc.get("method") == "CancelTask" and subject == verified.subject
                 and self.holders.get(task_id) == peer_of(scope))
 
-    def _owned(self, task_id: str, verified: Verified) -> str:
-        """A task is readable only under a chain for its person and its claim."""
+    def _owned(self, task_id: str, verified: Verified, peer: str = "") -> str:
+        """A task is readable only under a chain for its person and its claim.
+
+        Since Chapter 13, also under a link that names the task, from the workload that
+        sent it: a compensation reads and cancels the one task it undoes.
+        """
         subject, claim = self.tasks.get(task_id, ("", ""))
         if not subject:
             return ""  # not ours to judge: the handler answers for unknown tasks
+        named = task_id in verified.scope.tasks and claim in verified.scope.claims
+        if named and self.holders.get(task_id) == peer:
+            return claim
         if subject != verified.subject or claim not in verified.scope.claims:
             raise TaskHidden(task_id)
         return claim

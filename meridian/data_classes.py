@@ -10,6 +10,7 @@ from seamkit.contract import CrossingPolicy
 DATA_CLASSES: dict[str, str] = {
     "claim_id": "claim", "amount": "claim", "days_to_report": "claim",
     "police_report": "claim", "decision": "claim", "payment_ref": "claim",
+    "booking_ref": "claim", "task": "claim",  # Ch 13: a booking, and a task undone
     "damaged_parts": "vehicle", "covered_parts": "vehicle", "vin": "vehicle",
     "photo_url": "vehicle",
     "prior_claims": "claim_history",
